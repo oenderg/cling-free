@@ -21,16 +21,17 @@ OUT="$(mkdir -p "${3:-$PWD/dist}" && cd "${3:-$PWD/dist}" && pwd)"
 # too: Xcode 26 rejects Magnet (target 10.15) depending on Sauce (needs 11.0) otherwise. 14.0 is
 # the app's own minimum.
 #
-# Xcode 26.6 (the newest on GitHub's macOS runners) crashes in the SIL EarlyPerfInliner pass while
-# compiling the KeyboardShortcuts package. Switch that one pass off for that one target, through a
-# per-target variable, so Cling's own code keeps full optimisation. Newer Xcodes don't need it.
+# Xcode 26.6 (the newest on GitHub's macOS runners) crashes in the SIL inliner while compiling the
+# KeyboardShortcuts package (ObjectAssociation's deinit). That package is a small hotkey recorder
+# where speed is irrelevant, so build just it with -Onone, through a per-target variable. Every
+# other target, Cling's search code included, keeps the default -O. Newer Xcodes don't need this.
 cd "$SRC"
 xcodebuild -project Cling.xcodeproj -scheme Cling -configuration Release \
   -derivedDataPath DerivedData \
   ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   MACOSX_DEPLOYMENT_TARGET=14.0 \
-  'OTHER_SWIFT_FLAGS=$(inherited) $(CLING_SWIFT_FLAGS_$(TARGET_NAME))' \
-  'CLING_SWIFT_FLAGS_KeyboardShortcuts=-Xllvm -sil-disable-pass=early-inline' \
+  'SWIFT_OPTIMIZATION_LEVEL=$(CLING_OPT_$(TARGET_NAME):default=-O)' \
+  'CLING_OPT_KeyboardShortcuts=-Onone' \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ENABLE_HARDENED_RUNTIME=NO \
   build
 
