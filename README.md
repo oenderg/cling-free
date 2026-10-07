@@ -153,3 +153,5 @@ the app is ad-hoc signed, which works but loses its permission grants on every r
 
 Cling is GPL-3.0 and so is this repository. The unlock patch and tooling are published under the
 same licence, and the exact source of every binary is the `unlocked` branch.
+
+<!-- scope test -->
