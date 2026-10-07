@@ -31,6 +31,7 @@ applied, skipped = [], []
 
 # Public by design: the appcast this fork's CI publishes and the public half of the EdDSA key
 # it signs it with. Sparkle rejects any update whose signature doesn't verify against this key.
+# Checked in CI by tools/verify_unlock.py against every upstream release.
 APPCAST_URL = "https://raw.githubusercontent.com/oenderg/cling-free/main/appcast.xml"
 SPARKLE_PUBLIC_KEY = "MQEMtxrlAP1XyYthvetCdxX11JMtzPPh4HFRNNYCZ+M="
 
