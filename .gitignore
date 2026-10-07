@@ -5,3 +5,4 @@ DerivedData/
 *.pem
 MEMORY.md
 CLAUDE.local.md
+upstream-src/

@@ -36,7 +36,8 @@ stops with `unlock patch anchor drifted`.
 
 1. Read the failed run's log (`gh run view <id> --log-failed`) and find the failing step.
 2. Clone the newest release tag of the upstream repository named in your instructions (normally
-   `FuzzyIdeas/Cling`) into a scratch directory, with its `.git`.
+   `FuzzyIdeas/Cling`) into `upstream-src/` in the repository root (git-ignored, and inside the workspace so
+   you can read it), with its `.git`. Run simple commands one at a time; the tool allowlist rejects chained ones.
 3. Look at what upstream changed around the anchor and update the anchor in `tools/unlock_pro.py` to
    match, keeping the same effect.
 4. Run `python3 tools/unlock_pro.py <clone>` and then `python3 tools/verify_unlock.py <clone>`. Both
