@@ -1,0 +1,5 @@
+.DS_Store
+dist/
+DerivedData/
+*.p12
+*.pem
