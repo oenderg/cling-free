@@ -18,9 +18,14 @@ on:
         description: 'Rebuild even when upstream has no new version'
         type: boolean
         default: false
+      simulate_failure:
+        description: 'Fail on purpose, to test the failure issue and the auto-fix workflow'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   mirror:
@@ -90,6 +95,12 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Fail on purpose (test switch)
+        if: inputs.simulate_failure
+        run: |
+          echo "::error::simulated failure, requested by the simulate_failure input"
+          exit 1
+
       - name: Apply the unlock patch to a pristine upstream checkout
         if: steps.check.outputs.changed == 'true'
         env:
@@ -131,3 +142,53 @@ jobs:
       version: ${{ needs.sync.outputs.version }}
       release: true
     secrets: inherit
+
+  # Tell a person when the pipeline breaks, once per breakage rather than once per day: an open
+  # `ci-failure` issue gets a comment, otherwise one is opened. The next fully green run closes it.
+  notify-failure:
+    needs: [mirror, sync, build]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          VERSION: ${{ needs.sync.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/$REPO/actions/runs/$RUN_ID"
+          failed=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate --jq '
+            .jobs[] | select(.conclusion == "failure")
+            | "- **\(.name)**, step \"\([.steps[] | select(.conclusion == "failure") | .name] | first // "unknown")\""')
+          body=$(printf 'sync-upstream failed for upstream Cling %s.\n\n%s\n\nRun: %s\n\nThe most likely cause is that upstream changed a file the unlock patch anchors on (`tools/unlock_pro.py` then stops with "anchor drifted"). Nothing was published, so the last good release stays in place.' "${VERSION:-(unknown)}" "$failed" "$url")
+          gh label create ci-failure --repo "$REPO" --color B60205 --description "sync-upstream is broken" 2>/dev/null || true
+          existing=$(gh issue list --repo "$REPO" --label ci-failure --state open --json number -q '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "Failed again. $body"
+          else
+            gh issue create --repo "$REPO" --label ci-failure \
+              --title "sync-upstream failed (upstream ${VERSION:-unknown})" --body "$body"
+          fi
+
+  close-failure:
+    needs: [mirror, sync, build]
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for n in $(gh issue list --repo "$REPO" --label ci-failure --state open --json number -q '.[].number' 2>/dev/null); do
+            gh issue close "$n" --repo "$REPO" --comment "Fixed: sync-upstream passed again ($RUN_URL)."
+          done

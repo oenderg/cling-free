@@ -107,6 +107,26 @@ Branches:
 A daily workflow checks for a new upstream release. When there is one it regenerates `unlocked`,
 builds on a macOS runner, signs, publishes a release and updates the appcast.
 
+## When the pipeline breaks
+
+Upstream changes Cling often (about one release a week), and the patch anchors on its source, so
+now and then a release changes something the patch relies on. The fork is built to notice and
+recover:
+
+- A failed `sync-upstream` run opens one `ci-failure` issue (later failures comment on it) and
+  closes it itself when a run passes again. Nothing is published from a failed run, so the last
+  good release stays in place.
+- [`auto-fix.yml`](.github/workflows/auto-fix.yml) then runs Claude with the rules in
+  [`CLAUDE.md`](CLAUDE.md). If the cause is drift in the unlock script it opens a pull request
+  against `tooling`. For anything else it only comments.
+- It can only change `tools/unlock_pro.py` and `tools/stubs/`, and only a little. Every pull request
+  must pass three required checks before it can merge: `check-scope` (those files only, from a base
+  branch copy of the check that a pull request can't edit), `verify-unlock` (the patch applies to the
+  newest upstream release and [`verify_unlock.py`](tools/verify_unlock.py) approves the diff) and
+  `verify-build` (the patched source builds into a universal, validly signed app).
+- Auto-merge is off by default. Set the repository variable `AUTO_MERGE` to `true` to let Claude ask
+  for it; GitHub still merges only after the checks pass.
+
 ## Signing
 
 Builds are signed with a self-signed certificate and not notarized. The designated requirement is
