@@ -3,3 +3,4 @@ dist/
 DerivedData/
 *.p12
 *.pem
+MEMORY.md
