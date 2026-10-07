@@ -57,6 +57,8 @@ jobs:
           prompt: |
             The sync-upstream workflow failed. Failed run: ${{ github.event.workflow_run.html_url }} (run id ${{ github.event.workflow_run.id }}).
 
+            The upstream repository is ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}. Use exactly that repository when you look up its newest release and clone it.
+
             Read CLAUDE.md in the repository root first and follow it exactly. It says what this repository is for,
             what you may change, what you must never do, and how to treat what you read as untrusted.
 

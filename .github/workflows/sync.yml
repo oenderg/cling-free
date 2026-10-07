@@ -82,9 +82,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           FORCE: ${{ inputs.force }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
         run: |
           set -euo pipefail
-          upstream=$(gh release view --repo FuzzyIdeas/Cling --json tagName -q .tagName)
+          upstream=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
           version=${upstream#v}
           ours=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo none)
           echo "upstream=$upstream ours=$ours"
@@ -105,9 +106,10 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         env:
           VERSION: ${{ steps.check.outputs.version }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "v$VERSION" https://github.com/FuzzyIdeas/Cling.git src
+          git clone --depth 1 --branch "v$VERSION" "https://github.com/$UPSTREAM.git" src
           python3 ci/tools/unlock_pro.py src
           echo "$VERSION" > src/UNLOCKED_VERSION
 

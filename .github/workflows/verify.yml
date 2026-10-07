@@ -27,11 +27,12 @@ jobs:
       - name: Apply the unlock to the newest upstream release and verify the diff
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
         run: |
           set -euo pipefail
-          tag=$(gh release view --repo FuzzyIdeas/Cling --json tagName -q .tagName)
-          echo "checking against upstream $tag"
-          git clone -q --depth 1 --branch "$tag" https://github.com/FuzzyIdeas/Cling.git src
+          tag=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
+          echo "checking against upstream $UPSTREAM $tag"
+          git clone -q --depth 1 --branch "$tag" "https://github.com/$UPSTREAM.git" src
           python3 ci/tools/unlock_pro.py src
           python3 ci/tools/verify_unlock.py src
 
@@ -53,11 +54,12 @@ jobs:
       - name: Apply the unlock to the newest upstream release
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
         run: |
           set -euo pipefail
-          tag=$(gh release view --repo FuzzyIdeas/Cling --json tagName -q .tagName)
+          tag=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
           echo "TAG=$tag" >> "$GITHUB_ENV"
-          git clone -q --depth 1 --branch "$tag" https://github.com/FuzzyIdeas/Cling.git src
+          git clone -q --depth 1 --branch "$tag" "https://github.com/$UPSTREAM.git" src
           python3 ci/tools/unlock_pro.py src
           python3 ci/tools/verify_unlock.py src
 
