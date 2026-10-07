@@ -10,8 +10,10 @@ What it changes, and why:
      `invalidReq3`. Upstream's public sources call these but no longer define them (they moved
      out of the repo in 2.1.2), so this defines them: `proactive` is `true`, `validReq()` lets
      searches through, the other two do nothing.
-  2. `pro.checkProLicense()` becomes `pro.enablePro()`, so the app never asks Paddle about a
-     trial or licence and `pro.active` (the flag the Settings/filter UI reads) is true at once.
+  2. `pro.checkProLicense()` becomes `pro.enablePro()` plus `pro.onTrial = false`, so the app
+     never asks Paddle about a trial or licence at launch, `pro.active` (the flag the Settings
+     and filter UI read) is true at once, and the licence page reads "Licensed on this Mac"
+     instead of counting down a trial.
   3. The private `WarpDrop` package, referenced by a path that only exists on the author's
      machine, is repointed at a stub so the project resolves and builds.
   4. Sparkle is pointed at this fork's appcast and public key, so the app can't replace itself
@@ -95,7 +97,12 @@ def patch_proactive(root):
 
 def patch_licence_check(root):
     app = root / "Cling/ClingApp.swift"
-    replace_literal(app, "pro.checkProLicense()", "pro.enablePro()", "no Paddle licence check")
+    # enablePro() marks the product activated; the Paddle SDK's local trial counter would still
+    # leave `onTrial` true for 14 days and the licence page reading "Trial, 14 days remaining"
+    # with a Buy button. We're on the main thread here, so enablePro() has run by the next line.
+    replace_literal(app, "pro.checkProLicense()",
+                    "pro.enablePro()\n            pro.onTrial = false  // show \"Licensed\", not a trial countdown",
+                    "no Paddle licence check, no trial state")
     replace_literal(app, "if Defaults[.enableSentry] {", "if false { // unofficial build: no reports to upstream's Sentry",
                     "Sentry off", required=False)
 

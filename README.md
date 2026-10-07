@@ -62,7 +62,7 @@ domain. Your upstream Cling is backed up before it's replaced.
 | External volumes, Everything index | Pro | on |
 | Quick filters, folder filters, scripts | Pro | on |
 | File server | Pro | on |
-| 14-day trial, Paddle licence check | yes | none; the app never contacts Paddle |
+| 14-day trial, Paddle licence check | yes | none at launch; the licence page shows "Licensed on this Mac" |
 | Send securely | works | **off** — see below |
 | Error reports to upstream's Sentry | sent when enabled in Settings | removed |
 | Auto-update | upstream's feed | this repo's feed, signed with this repo's key |
@@ -83,8 +83,10 @@ things:
 1. Defines `proactive` (the flag every Pro gate in Cling reads) as `true`, along with `validReq`,
    `invalidReq` and `invalidReq3`. Upstream's public sources call all four but no longer define
    them, so without these the project doesn't compile.
-2. Replaces the app's `pro.checkProLicense()` call with `pro.enablePro()`, so the Paddle SDK is
-   never asked about a trial or licence and the Settings and filter UI see an active licence.
+2. Replaces the app's `pro.checkProLicense()` call with `pro.enablePro()` and clears the trial
+   flag, so the app doesn't ask Paddle about a trial or licence at launch and the Settings and
+   filter UI see an active licence. The Paddle SDK is still linked in: the "Buy" and "Manage"
+   buttons on the licence page are upstream's and would still reach Paddle if you press them.
 3. Repoints the private `WarpDrop` package at the stub in [`tools/stubs`](tools/stubs).
 4. Points Sparkle at this repo's appcast and EdDSA public key, so the app can't update itself
    into the official, locked build.
