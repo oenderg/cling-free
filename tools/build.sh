@@ -20,11 +20,17 @@ OUT="$(mkdir -p "${3:-$PWD/dist}" && cd "${3:-$PWD/dist}" && pwd)"
 # MACOSX_DEPLOYMENT_TARGET is forced on the command line so it reaches the SwiftPM package targets
 # too: Xcode 26 rejects Magnet (target 10.15) depending on Sauce (needs 11.0) otherwise. 14.0 is
 # the app's own minimum.
+#
+# Xcode 26.6 (the newest on GitHub's macOS runners) crashes in the SIL EarlyPerfInliner pass while
+# compiling the KeyboardShortcuts package. Switch that one pass off for that one target, through a
+# per-target variable, so Cling's own code keeps full optimisation. Newer Xcodes don't need it.
 cd "$SRC"
 xcodebuild -project Cling.xcodeproj -scheme Cling -configuration Release \
   -derivedDataPath DerivedData \
   ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   MACOSX_DEPLOYMENT_TARGET=14.0 \
+  'OTHER_SWIFT_FLAGS=$(inherited) $(CLING_SWIFT_FLAGS_$(TARGET_NAME))' \
+  'CLING_SWIFT_FLAGS_KeyboardShortcuts=-Xllvm -sil-disable-pass=early-inline' \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ENABLE_HARDENED_RUNTIME=NO \
   build
 
