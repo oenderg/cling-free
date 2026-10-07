@@ -49,6 +49,19 @@ jobs:
           [ -n "$version" ] || version=$(cat src/UNLOCKED_VERSION)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Select Xcode
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app
+          # Xcode 26.6's Swift compiler crashes (EarlyPerfInliner) on the KeyboardShortcuts
+          # package, so prefer the newest Xcode on the image unless XCODE_APP pins one.
+          app="${XCODE_APP:-$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)}"
+          echo "using $app"
+          sudo xcode-select -s "$app/Contents/Developer"
+          xcodebuild -version
+
       - name: Import signing identity
         id: sign
         env:
