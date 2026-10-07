@@ -35,7 +35,7 @@ applied, skipped = [], []
 APPCAST_URL = "https://raw.githubusercontent.com/oenderg/cling-free/main/appcast.xml"
 SPARKLE_PUBLIC_KEY = "MQEMtxrlAP1XyYthvetCdxX11JMtzPPh4HFRNNYCZ+M="
 
-WARPDROP_PATH = "../../../Github/alin23/warpdrop/swift"
+WARPDROP_PATH = "../../../Github/alin23/warpdrop/packages/swift"
 WARPDROP_STUB = "Stubs/WarpDrop"
 
 UNLOCKED_SWIFT = """\
