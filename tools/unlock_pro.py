@@ -101,7 +101,7 @@ def patch_licence_check(root):
     # enablePro() marks the product activated; the Paddle SDK's local trial counter would still
     # leave `onTrial` true for 14 days and the licence page reading "Trial, 14 days remaining"
     # with a Buy button. We're on the main thread here, so enablePro() has run by the next line.
-    replace_literal(app, "pro.checkProLicense()",
+    replace_literal(app, "pro.checkProLicence()",
                     "pro.enablePro()\n            pro.onTrial = false  // show \"Licensed\", not a trial countdown",
                     "no Paddle licence check, no trial state")
     replace_literal(app, "if Defaults[.enableSentry] {", "if false { // unofficial build: no reports to upstream's Sentry",
