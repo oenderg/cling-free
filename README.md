@@ -104,8 +104,9 @@ Branches:
 - **`unlocked`** is the pristine upstream release tag with the patch applied, regenerated on each
   new release. This is the exact source every release binary is built from.
 
-A daily workflow checks for a new upstream release. When there is one it regenerates `unlocked`,
-builds on a macOS runner, signs, publishes a release and updates the appcast.
+A workflow checks for a new upstream release every hour, and a daily run backs it up. When there is
+a new release it regenerates `unlocked`, builds on a macOS runner, signs, publishes a release and
+updates the appcast.
 
 ## When the pipeline breaks
 
