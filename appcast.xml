@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Cling (unlocked)</title>
+    <link>https://github.com/oenderg/cling-free</link>
+    <description>Builds of FuzzyIdeas/Cling with the Pro gating removed.</description>
+    <language>en</language>
+    <item>
+      <title>3.1.1</title>
+      <pubDate>Thu, 08 Oct 2026 14:13:24 GMT</pubDate>
+      <sparkle:version>3.1.1</sparkle:version>
+      <sparkle:shortVersionString>3.1.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/oenderg/cling-free/releases/tag/v3.1.1-unlocked</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/oenderg/cling-free/releases/download/v3.1.1-unlocked/Cling-3.1.1-unlocked.zip"
+                 sparkle:version="3.1.1"
+                 sparkle:shortVersionString="3.1.1"
+                 length="20729156"
+                 type="application/octet-stream"
+                 sparkle:edSignature="4v7a0iF9KFryUPoWKHdnlv850pCq8tYDxHep++N3j+owmt34Z11i/jrbAFU9HVPxzeBhDckbpSAiFt2tZjuAAw==" />
+    </item>
+  </channel>
+</rss>
