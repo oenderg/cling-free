@@ -1,0 +1,210 @@
+<p align="center">
+    <a href="https://lowtechguys.com/cling"><img width="128" height="128" src="Cling/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" style="filter: drop-shadow(0px 2px 4px rgba(80, 50, 6, 0.2));"></a>
+    <h1 align="center"><code style="text-shadow: 0px 3px 10px rgba(8, 0, 6, 0.35); font-size: 3rem; font-family: ui-monospace, Menlo, monospace; font-weight: 800; background: transparent; color: #4d3e56; padding: 0.2rem 0.2rem; border-radius: 6px">Cling</code></h1>
+    <h4 align="center" style="padding: 0; margin: 0; font-family: ui-monospace, monospace;">Instant fuzzy find any file</h4>
+    <h6 align="center" style="padding: 0; margin: 0; font-family: ui-monospace, monospace; font-weight: 400;">Act on it in the same instant</h6>
+</p>
+
+<p align="center">
+    <a href="https://files.lowtechguys.com/releases/Cling.dmg">
+        <img width=200 src="https://files.lowtechguys.com/macos-app.svg">
+    </a>
+</p>
+
+### Installation
+
+- Download the app from the [website](https://lowtechguys.com/cling) and drag it to your `Applications` folder
+- If you use [homebrew](https://brew.sh/), run `brew install --cask thelowtechguys-cling`
+
+![screenshot](https://lowtechguys.com/static/img/cling-ui.png)
+
+### Features
+
+- **Fuzzy search across millions of files** in under 100ms
+- **Search bar** that floats over any app like Spotlight, or sits pinned to the desktop as a small search field
+- **App launcher** in the search bar: installed apps whose names match come first
+- **Folder icons** on the search bar's paths, with an icon you pick for each drive
+- **Quick Filters** for file types (Images, Videos, Documents, Code, PDFs, etc.) and folder restrictions
+- **Act on files instantly** with hotkeys, scripts, drag and drop, or batch rename
+- **Smart defaults** showing your most recently changed files on launch
+- **Search history** with `Up`/`Down` arrow cycling, `Tab` completion, and `Cmd+Down` to browse all history
+- **Extension-aware queries** like `.png icon` or `.pdf invoice`
+- **Search operators** to filter and exclude results as you type
+- **Configurable search scopes** (Home, Library, Cloud Storage, Applications, System, Root) with `.fsignore` support
+- **External volume indexing** with persistent indexes that work even when unmounted, and live updates while connected
+- **Cloud storage** search across iCloud Drive, Dropbox, Google Drive and other cloud folders, files kept online only included, without downloading them
+- **Live filesystem tracking** via FSEvents
+- **Index size view** showing how many files each scope and folder adds to the index, with a way to prune the ones you don't need
+- **Send securely** to share files over an encrypted, auto-expiring link
+- **CLI tool** for terminal-based searching
+- **MCP server** so an AI agent can search, explain why a file is missing and change indexes, ignore rules, filters and settings
+- **the Everything index**: every file on the local disks, with no ignore rules, like Everything on Windows, or turned off entirely
+
+---
+
+### Pro features
+
+Cling is free to use with Home, Library, Cloud Storage and Applications search scopes. A **Cling Pro** licence unlocks:
+
+- **Additional search scopes**: System, Root
+- **External volume indexing** with persistent indexes, and an *External drives* filter to find which drive holds a file
+- **the Everything index** of every file on the local disks
+- **File server** to search this Mac and download its files from a browser on your phone or another computer
+- **Quick Filters** for file types and custom queries
+- **Custom folder filters** for saved folder sets
+- **Scripts** to run custom actions on files
+- **Up to 10,000 results** (free is capped at 500)
+
+### Pricing
+
+Cling starts with a **14-day free trial** automatically, no payment details needed. After the trial, the app continues to work in **Free mode** with Home, Library, Cloud Storage and Applications scopes, up to 500 results.
+
+A Pro license costs **€15**, one-time purchase, for life. It can be activated on up to **5 personal Mac devices**.
+
+*Activating a 6th Mac automatically deactivates the oldest one, so the license can be used indefinitely as you change machines.*
+
+### Raycast extension
+
+[Cling's Raycast extension](https://www.raycast.com/alin/cling) can fuzzy search files instantly, act on files and save often used queries from the same familiar Raycast interface.
+
+### Alfred workflow
+
+Cling ships an Alfred workflow that fuzzy searches files with `cl`, opens them in the editor, terminal or shelf app set in Cling, and reindexes with `clreindex`. Install it from **Settings > General** in Cling.
+
+---
+
+### Comparison with other apps
+
+#### Spotlight, Alfred, Raycast
+
+Cling is similar to these apps in that it provides instant search results, but the key differences are:
+
+- **Fuzzy search**: find files with partial or misspelled queries
+- **System files**: search system files, hidden files, dotfiles, and app data that the Spotlight index doesn't include
+- **Extension filtering**: quickly narrow results by file type without crafting complex queries
+
+#### ProFind, HoudahSpot, EasyFind, Tembo, Find Any File
+
+Cling is very much **not** like these apps.
+
+They are all file search apps that provide advanced search features, allowing you to craft complex queries using metadata and file content to dig deep into your filesystem and find as many files as possible.
+
+Cling is for quickly finding one or more specific files by roughly knowing the name, and then doing something with the file immediately like:
+
+- copying it for sending on chat
+- adding to a shelf like Yoink
+- opening it in an app like Pixelmator
+- uploading it using Dropshare
+- executing a script on the file
+
+**Cling is not an app for finding all files that match a complex query.**
+
+---
+
+### Performance considerations
+
+#### Memory usage
+
+Cling uses between 60 and 100 MB of memory with 1.6 million files indexed.
+
+Each search scope and each drive has its own index, saved as a file on disk. Cling maps those files into memory instead of reading them in: macOS loads the pages a search needs straight from the file, and drops them again whenever it needs the room. A loaded index adds almost nothing to Cling's memory until something changes it.
+
+What does count:
+
+- **File changes**: a change rewrites the few pages that hold it, and the first change also builds a lookup table, a few megabytes for a scope with a few hundred thousand files
+- **Extension table**: one table of file extensions shared by every index, usually under 10 MB
+- **Search buffers**: a search over millions of files works in memory that goes back to the system as soon as the search is done
+
+The **Everything** index stays on disk until you turn it on, and leaves memory 10 minutes after you turn it off or close the window. Turning Everything off in Settings > Search can also delete its saved index.
+
+On disk, an index takes about 160 bytes per file. The index size view in the status bar shows each index's files, size on disk, memory and when it was last indexed in full.
+
+#### CPU usage
+
+The most CPU-intensive operations are:
+
+- **Indexing**: when Cling is indexing your filesystem for the first time, it will keep the CPU busy for a few dozen seconds
+- **Following changes**: the indexes follow file changes as they happen, through FSEvents, instead of being re-indexed on a schedule
+- **Fuzzy search**: when you type in the search bar, Cling searches every index in parallel, across all cores
+
+When Cling launches, each index catches up by replaying the file changes made since it was saved. While Cling is closed, a small background job gathers those changes every few hours, waiting for a moment when you're not using the Mac, so the next launch has less to replay. It can be turned off with *Watch file events while the app is quit* in Settings > Search.
+
+A scope is walked again from scratch only when there is no history to replay: after a macOS update, when its ignore rules changed while Cling was closed, or when macOS threw away its file change history. External drives follow their changes the same way while connected, and are walked again once a week by default, once the drive has gone a minute without changes. Both can be changed per drive in Settings > Drives & Volumes. A drive unplugged without ejecting is walked again only when you ask, from the offer to reindex it shown when you search it.
+
+Searching will consume CPU in short bursts. In a Release build, a typical search across 9+ million files completes in under 100ms. When Cling is in background, it will pause searching and consume very little CPU for processing file changes.
+
+#### Battery usage
+
+The impact on battery is proportional to how many searches you do and how many file changes happen in the background.
+
+Even though a search will look like it's consuming 100% CPU of multiple cores, it's a very fast operation and the battery energy used isn't that high in the long term.
+
+Processing and indexing file changes is very efficient and barely touches battery life. Walking a scope again waits while the battery is under 30%.
+
+---
+
+### How it works
+
+```
+Filesystem ──► fts_read (local) / FileManager (external)
+                        │
+                        ▼
+              ┌───────────────────────┐
+              │  Binary Index (.idx)  │  one per scope/volume
+              │  parallel arrays:     │  persists across launches
+              │   · path bytes (LC)   │  saved again after 20k changes or 6h
+              │   · 64-bit bitmasks   │
+              │   · basename bitmasks │
+              │   · word boundaries   │
+              │   · extension IDs     │
+              └────────┬──────────────┘
+                       │ mmap: pages read on demand,
+                       │ copied only when a change writes them
+                       ▼
+              ┌───────────────────────┐
+              │  Search Engines       │◄── FSEvents (live updates)
+              │  · per-scope (Home,   │◄── replay since last save (launch)
+              │    Apps, Library, …) │◄── catch-up journal (while closed)
+              │  · per-volume         │◄── MDQuery  (recents)
+              │  · Everything         │
+              │  · recents            │
+              └────────┬──────────────┘
+                       │
+                    query  →  parse into fuzzy / extension /
+                              folder / dir-segment tokens
+                       │
+                       ▼
+              Phase 1: Filter (parallel across cores)
+               · 64-bit bitmask precheck
+               · extension ID (UInt16 compare)
+               · folder prefix (sorted index or byte scan)
+               · dir-segment literal substring
+               · excluded paths (O(1) set lookup)
+               · QuickFilter pre-filtered pools
+                       │
+                       ▼
+              Phase 2: Score (parallel across cores)
+               · fzf fuzzy scoring (basename + full path)
+               · multi-token independent scoring
+               · SIMD byte search for long paths
+               · boundary/camelCase/delimiter bonuses
+               · typo pass: one letter extra, missing,
+                 swapped or mistyped (two in long words)
+                       │
+                       ▼
+              Every engine in parallel (TaskGroup)
+               · merged once all of them finish
+               · a search still running after 150ms
+                 shows what the finished ones found
+                       │
+                       ▼
+              Merge + Rank
+               · quality gate (top-third filter)
+               · composite rank: score, importance,
+                 prefix match, basename match, depth
+               · misspelt names after exact matches
+               · deduplicate by path
+                       │
+                       ▼
+                    Results
+```

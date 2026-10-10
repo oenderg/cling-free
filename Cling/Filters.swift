@@ -1,0 +1,1598 @@
+import Defaults
+import Foundation
+import Lowtech
+import LowtechPro
+import SwiftUI
+import System
+
+// MARK: - FilterPicker
+
+struct FilterPicker: View {
+    /// Wide enough that the scope icon's tinted disc has room around the glyph. Also drives the
+    /// leading inset of the rows under the search field, so growing it keeps them aligned.
+    static let iconWidth: CGFloat = 26
+
+    var body: some View {
+        menu
+            .onAppear { installFilterShortcutMonitor() }
+            .onDisappear { removeFilterShortcutMonitor() }
+            .sheet(isPresented: $isAddingQuickFilter, onDismiss: {
+                saveQuickFilter(draft: filterDraft, originalID: originalFilterID)
+                filterDraft = QuickFilterDraft()
+                originalFilterID = ""
+                isEditingFilter = false
+            }) {
+                QuickFilterAddSheet(draft: $filterDraft)
+            }
+            .sheet(isPresented: $isAddingFolderFilter, onDismiss: {
+                saveFolderFilter(id: filterID, folders: filterFolders, key: filterKey, originalID: originalFilterID)
+                filterID = ""
+                originalFilterID = ""
+                filterFolders = []
+                isEditingFilter = false
+            }) {
+                FolderFilterAddSheet(id: $filterID, folders: $filterFolders, key: $filterKey)
+            }
+    }
+
+    var menu: some View {
+        Group {
+            if proManager.pro?.active != true {
+                Button(action: { showNeedsProPopover = true }) {
+                    filterLabel
+                }
+                .buttonStyle(.borderlessText)
+                .popover(isPresented: $showNeedsProPopover) {
+                    if let pro = PM.pro {
+                        PaddedPopoverView(background: Color.red.brightness(0.1).any) {
+                            NeedsProView(size: 16, color: .black.opacity(0.8), pro: pro)
+                        }
+                    }
+                }
+            } else if km.optionOnly || showFilterEditor {
+                Button(action: { showFilterEditor = true }) {
+                    Image(systemName: "slider.horizontal.3")
+                        .frame(width: FilterPicker.iconWidth)
+                }
+                .accessibilityLabel("Edit filters")
+                .buttonStyle(.borderlessText)
+                .sheet(isPresented: $showFilterEditor) {
+                    FilterEditorSheet()
+                }
+            } else {
+                Menu {
+                    folderFilterPicker
+                    quickFilterPicker
+                    volumePicker
+
+                    Button("All files (clear filters)") {
+                        fuzzy.folderFilter = nil
+                        fuzzy.quickFilter = nil
+                        fuzzy.volumeFilter = nil
+                    }
+                    .help("Searches all indexed files without any filters")
+                    // Hint only; the NSEvent monitor does the actual handling.
+                    .keyboardShortcut(.escape, modifiers: [.option])
+                } label: {
+                    filterLabel
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderlessText)
+            }
+        }
+        .fixedSize()
+    }
+
+    private enum IndexStatus {
+        case indexed, indexing, notIndexed, disconnected
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var defaults = DEFAULTS_CACHE
+    @State private var fuzzy: FuzzyClient = FUZZY
+    @ObservedObject private var km = KM
+    @ObservedObject private var proManager = PM
+
+    @State private var lastQuery = ""
+
+    @State private var isAddingQuickFilter = false
+    @State private var isAddingFolderFilter = false
+    @State private var isEditingFilter = false
+    @State private var originalFilterID = ""
+    @State private var filterDraft = QuickFilterDraft()
+    // Folder-filter flow keeps its own vars (shared with FolderFilterAddSheet).
+    @State private var filterID = ""
+    @State private var filterFolders: [FilePath] = []
+    @State private var filterKey: SauceKey = .escape
+
+    @State private var showFilterEditor = false
+
+    @State private var showNeedsProPopover = false
+
+    @State private var filterShortcutMonitor: Any?
+
+    private var folderFilters: [FolderFilter] {
+        defaults.folderFilters
+    }
+    private var quickFilters: [QuickFilter] {
+        defaults.quickFilters
+    }
+
+    private var enabledVolumes: [FilePath]? {
+        fuzzy.enabledVolumes.isEmpty ? nil : fuzzy.enabledVolumes
+    }
+
+    @ViewBuilder
+    private var volumePicker: some View {
+        if let enabledVolumes {
+            let volumes = ([FilePath.root] + enabledVolumes).enumerated().map { $0 }
+            Picker(selection: $fuzzy.volumeFilter) {
+                Text("Volumes").round(11).foregroundColor(.secondary).selectionDisabled()
+                ForEach(volumes, id: \.1) { i, volume in
+                    filterItem(volume, key: i > 9 ? nil : i.s.first)
+                }
+                if fuzzy.offersAllDrivesFilter {
+                    allDrivesItem(enabledVolumes, key: fuzzy.allDrivesKeyApplies(quickFilters: quickFilters, folderFilters: folderFilters) ? ALL_DRIVES_KEY : nil)
+                }
+            } label: { Text("Volume filter") }
+                .labelsHidden()
+                .pickerStyle(.inline)
+        }
+    }
+
+    @ViewBuilder
+    private var folderFilterPicker: some View {
+        if !folderFilters.isEmpty || fuzzy.folderFilter != nil {
+            Picker(selection: $fuzzy.folderFilter) {
+                Text("Folder filters").round(11).foregroundColor(.secondary).selectionDisabled()
+                ForEach(folderFilters, id: \.self) { filter in
+                    filterItem(filter)
+                }
+
+                if let filter = fuzzy.folderFilter, !folderFilters.contains(filter) {
+                    Divider()
+                    filterItem(filter, applyShortcut: false)
+                }
+            } label: { Text("Folder filter") }
+                .labelsHidden()
+                .pickerStyle(.inline)
+        }
+    }
+
+    @ViewBuilder
+    private var quickFilterPicker: some View {
+        if !quickFilters.isEmpty || fuzzy.quickFilter != nil {
+            Picker(selection: $fuzzy.quickFilter) {
+                Text("Quick filters").round(11).foregroundColor(.secondary).selectionDisabled()
+                ForEach(quickFilters, id: \.self) { filter in
+                    filterItem(filter)
+                }
+
+                if let filter = fuzzy.quickFilter, !quickFilters.contains(filter) {
+                    Divider()
+                    filterItem(filter, applyShortcut: false)
+                }
+            } label: { Text("Quick filter") }
+                .labelsHidden()
+                .pickerStyle(.inline)
+        }
+    }
+
+    /// The scope's own icon and colour when the search is narrowed, so the window says what it is
+    /// looking through before you read a word of it. Falls back to the generic filter glyph while
+    /// searching everything.
+    private var filterLabel: some View {
+        Group {
+            if let scope = fuzzy.scopeAppearance {
+                let dark = colorScheme == .dark
+                Image(systemName: scope.icon)
+                    .foregroundStyle(scope.color.accent(dark: dark))
+                    // Square frame so the disc is round, and sized to the slot the generic glyph
+                    // already occupied so adding it moves nothing else in the toolbar.
+                    .frame(width: FilterPicker.iconWidth, height: FilterPicker.iconWidth)
+                    .filterIconBackground(scope.color, dark: dark, glow: true)
+            } else {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .frame(width: FilterPicker.iconWidth, height: FilterPicker.iconWidth)
+            }
+        }
+        .frame(width: FilterPicker.iconWidth)
+    }
+
+    private func filterItem(_ filter: FilePath, key: Character?) -> some View {
+        let status = volumeStatus(filter)
+        let subtitle: String = switch status {
+        case .notIndexed: "Click to start indexing"
+        case .indexing: "Indexing in progress..."
+        case .indexed: filter == .root ? "/" : filter.shellString
+        case .disconnected: "Volume not connected, searching cached index"
+        }
+        return (
+            Text((filter == .root ? (filter.url.volumeName ?? "Root") : filter.name.string) + statusSuffix(status) + "\n") +
+                Text(subtitle)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        )
+        .tag(filter as FilePath?)
+        .help(status == .notIndexed ? "Click to start indexing \(filter.shellString)" : status == .disconnected ? "Volume not connected, searches cached index" : "Searches inside: \(filter.shellString)")
+        // Hint only; the NSEvent monitor does the actual handling.
+        .ifLet(key) { view, key in
+            view.keyboardShortcut(KeyEquivalent(key), modifiers: [.option])
+        }
+        .truncationMode(.tail)
+        .disabled(status == .indexing)
+    }
+
+    /// Every drive's saved index at once, for finding which drive holds a file while most of them are unplugged.
+    /// `key` is nil when one of the user's own filters has taken E.
+    private func allDrivesItem(_ drives: [FilePath], key: Character?) -> some View {
+        let disconnected = drives.filter { fuzzy.disconnectedVolumes.contains($0) }.count
+        let subtitle = disconnected > 0 ? "\(drives.count) drives, \(disconnected) disconnected" : "\(drives.count) drives"
+        return (
+            Text("External drives\n") +
+                Text(subtitle)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        )
+        .tag(FilePath.allDrives as FilePath?)
+        .help("Searches in \(drives.map(\.name.string).joined(separator: ", "))")
+        // Hint only; the NSEvent monitor does the actual handling.
+        .ifLet(key) { view, key in
+            view.keyboardShortcut(KeyEquivalent(key), modifiers: [.option])
+        }
+        .truncationMode(.tail)
+    }
+
+    private func filterItem(_ filter: QuickFilter, applyShortcut: Bool = true) -> some View {
+        (
+            Text("\(filter.id)\n") +
+                Text(filter.menuSubtitle)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        )
+        .tag(filter as QuickFilter?)
+        .help(filter.subtitle)
+        // Hint only; the NSEvent monitor does the actual handling.
+        .ifLet(applyShortcut ? filter.key : nil) { view, key in
+            view.keyboardShortcut(KeyEquivalent(key), modifiers: [.option])
+        }
+        .truncationMode(.tail)
+    }
+
+    private func filterItem(_ filter: FolderFilter, applyShortcut: Bool = true) -> some View {
+        let status = folderFilterStatus(filter)
+        return (
+            Text("\(filter.id)\(statusSuffix(status))\n") +
+                Text(filter.menuSubtitle)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        )
+        .tag(filter as FolderFilter?)
+        .help("Searches in \(filter.folders.map(\.shellString).joined(separator: ", "))")
+        // Hint only; the NSEvent monitor does the actual handling.
+        .ifLet(applyShortcut ? filter.key : nil) { view, key in
+            view.keyboardShortcut(KeyEquivalent(key), modifiers: [.option])
+        }
+        .truncationMode(.tail)
+        .disabled(status == .indexing)
+    }
+
+    @ViewBuilder private func filterButtons(_ filter: QuickFilter, action: String = "Edit") -> some View {
+        Button(action) {
+            isEditingFilter = action == "Edit"
+            originalFilterID = filter.id
+            filterDraft = QuickFilterDraft(from: filter)
+            isAddingQuickFilter = true
+        }
+        Button("Delete") {
+            Defaults[.quickFilters] = Defaults[.quickFilters].without(filter)
+            if fuzzy.quickFilter == filter {
+                fuzzy.quickFilter = nil
+            }
+        }
+    }
+
+    @ViewBuilder private func filterButtons(_ filter: FolderFilter, action: String = "Edit") -> some View {
+        Button(action) {
+            isEditingFilter = action == "Edit"
+            originalFilterID = filter.id
+            filterID = filter.id
+            filterFolders = filter.folders
+            filterKey = filter.key.flatMap { SauceKey(rawValue: $0.lowercased()) } ?? .escape
+            isAddingFolderFilter = true
+        }
+        Button("Delete") {
+            Defaults[.folderFilters] = Defaults[.folderFilters].without(filter)
+            if fuzzy.folderFilter == filter {
+                fuzzy.folderFilter = nil
+            }
+        }
+    }
+
+    private func installFilterShortcutMonitor() {
+        guard filterShortcutMonitor == nil else { return }
+        filterShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if NSApp.keyWindow?.attachedSheet != nil {
+                return event
+            }
+            if DropZoneOverlay.shared.isPresenting {
+                return event
+            }
+            if event.window !== AppDelegate.shared.mainWindow {
+                return event
+            }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // A keypad digit carries .numericPad along with ⌥, and picks its volume the same as the top row.
+            guard mods.subtracting(.numericPad) == .option else { return event }
+
+            // ⌥⎋ → clear all filters
+            if event.keyCode == 53 {
+                FUZZY.folderFilter = nil
+                FUZZY.quickFilter = nil
+                FUZZY.volumeFilter = nil
+                return nil
+            }
+
+            // Applying a filter needs Pro. This monitor sees the key before the window's own gated handler,
+            // so without the check here ⌥ keys would apply filters and pick volumes for free.
+            guard proactive, let ch = (event.charactersIgnoringModifiers ?? "").lowercased().first else {
+                return event
+            }
+
+            // Quick filters
+            if let qf = Defaults[.quickFilters].first(where: { $0.key == ch }) {
+                FUZZY.quickFilter = qf
+                return nil
+            }
+            // Folder filters
+            if let ff = Defaults[.folderFilters].first(where: { $0.key == ch }) {
+                FUZZY.folderFilter = ff
+                return nil
+            }
+            // External drives, after the user's own filters so one of theirs on E keeps it
+            if ch == ALL_DRIVES_KEY, FUZZY.allDrivesKeyApplies() {
+                FUZZY.volumeFilter = .allDrives
+                return nil
+            }
+            // Volumes (digit keys; index 0 = root, 1...n = enabled volumes)
+            if let digit = ch.wholeNumberValue {
+                let enabled = FUZZY.enabledVolumes
+                if !enabled.isEmpty {
+                    let volumes = [FilePath.root] + enabled
+                    if digit < volumes.count {
+                        FUZZY.volumeFilter = volumes[digit]
+                        return nil
+                    }
+                }
+            }
+            return event
+        }
+    }
+
+    private func removeFilterShortcutMonitor() {
+        if let m = filterShortcutMonitor {
+            NSEvent.removeMonitor(m)
+            filterShortcutMonitor = nil
+        }
+    }
+
+    private func volumeStatus(_ volume: FilePath) -> IndexStatus {
+        if volume == .root {
+            return .indexed
+        }
+        if fuzzy.disconnectedVolumes.contains(volume) {
+            if fuzzy.volumeEngines[volume] != nil {
+                return .disconnected
+            }
+            return .disconnected
+        }
+        if fuzzy.volumesIndexing.contains(volume) {
+            return .indexing
+        }
+        if fuzzy.volumeEngines[volume] != nil {
+            return .indexed
+        }
+        return .notIndexed
+    }
+
+    private func scopeForFolder(_ folder: FilePath) -> SearchScope? {
+        let s = folder.string
+        let home = HOME.string
+        if s.hasPrefix(home + "/Library") {
+            return .library
+        }
+        if s.hasPrefix(home) {
+            return .home
+        }
+        if s.hasPrefix("/Applications") || s.hasPrefix("/System/Applications") {
+            return .applications
+        }
+        if s.hasPrefix("/System") {
+            return .system
+        }
+        if ["/usr", "/bin", "/sbin", "/opt", "/etc", "/Library", "/var", "/private"].contains(where: { s.hasPrefix($0) }) {
+            return .root
+        }
+        return nil
+    }
+
+    private func folderFilterStatus(_ filter: FolderFilter) -> IndexStatus {
+        let scopes = defaults.searchScopes
+        for folder in filter.folders {
+            if let volume = fuzzy.enabledVolumes.first(where: { folder.starts(with: $0) }) {
+                if fuzzy.volumesIndexing.contains(volume) {
+                    return .indexing
+                }
+                if fuzzy.volumeEngines[volume] == nil {
+                    return .notIndexed
+                }
+                continue
+            }
+            if let scope = scopeForFolder(folder) {
+                if !scopes.contains(scope) {
+                    return .notIndexed
+                }
+                if fuzzy.scopeEngines[scope] == nil {
+                    return fuzzy.indexing ? .indexing : .notIndexed
+                }
+            }
+        }
+        return .indexed
+    }
+
+    private func statusSuffix(_ status: IndexStatus) -> String {
+        switch status {
+        case .indexed: ""
+        case .indexing: " [Indexing...]"
+        case .notIndexed: " [Not indexed]"
+        case .disconnected: " [Disconnected]"
+        }
+    }
+
+}
+
+@MainActor
+func saveQuickFilter(draft: QuickFilterDraft, originalID: String = "") {
+    let filter = draft.asFilter
+    guard !filter.id.isEmpty,
+          filter.extensions != nil || filter.exclude != nil || filter.match != .both || filter.folders?.isEmpty == false || filter.rawQuery != nil
+    else { return }
+
+    let originalFilter = Defaults[.quickFilters].first { $0.id == originalID }
+
+    if let keyChar = filter.key,
+       let existingFilter = Defaults[.quickFilters].first(where: { $0.key == keyChar }),
+       existingFilter != originalFilter
+    {
+        Defaults[.quickFilters] = Defaults[.quickFilters].without([existingFilter, originalFilter ?? filter]) + [existingFilter.withKey(nil), filter]
+    } else {
+        Defaults[.quickFilters] = Defaults[.quickFilters].without(originalFilter ?? filter) + [filter]
+    }
+    FUZZY.quickFilter = filter
+}
+
+// MARK: - FilterDraftFromQuery
+
+/// What ⌘S makes of a query in the window or the bar: a folder filter when it is only `in:` folders, otherwise a quick
+/// filter with its extensions, folders and match taken from the query, and any other words kept as the text put before
+/// it so nothing is lost.
+enum FilterDraftFromQuery {
+    case quick(QuickFilterDraft)
+    case folder(id: String, folders: [FilePath], key: SauceKey)
+
+    init(query: String) {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let tokens = q.split(separator: " ")
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+
+        // Parse extension tokens (.swift, *.pdf, etc.)
+        let extTokens = tokens.filter { $0.hasPrefix(".") || $0.hasPrefix("*.") }
+        // Parse in: folder tokens
+        let inTokens: [FilePath] = tokens.compactMap { token in
+            guard token.hasPrefix("in:"), token.count > 3 else { return nil }
+            var path = String(token.dropFirst(3))
+            if path.hasPrefix("~") {
+                path = homePath + path.dropFirst()
+            }
+            return path.filePath
+        }
+        let fuzzyTokens = tokens.filter { !$0.hasPrefix(".") && !$0.hasPrefix("*.") && !$0.hasPrefix("in:") }
+
+        if !inTokens.isEmpty, extTokens.isEmpty, fuzzyTokens.isEmpty {
+            let id = inTokens.count == 1 ? inTokens[0].name.string.prefix(1).uppercased() + inTokens[0].name.string.dropFirst() : ""
+            self = .folder(id: id, folders: inTokens, key: getFilterKey(id: id))
+            return
+        }
+
+        var draft = QuickFilterDraft()
+        draft.extensions = extTokens.map { $0.hasPrefix("*.") ? "." + $0.dropFirst(2) : String($0) }.joined(separator: " ")
+        draft.match = q.hasSuffix("/") ? .folders : .both
+        draft.folders = inTokens
+        draft.prepend = fuzzyTokens.joined(separator: " ")
+
+        let nameSource = fuzzyTokens.isEmpty ? extTokens : fuzzyTokens
+        let name = nameSource.map(String.init).joined(separator: " ")
+        draft.name = name.prefix(1).uppercased() + name.dropFirst()
+        draft.hotkey = getFilterKey(id: draft.name)
+        self = .quick(draft)
+    }
+}
+
+/// Whether ⌘S saves the query as a filter. It does from the search field, in the window and the bar alike; from the
+/// results, or with no query to save, ⌘S is left to Stash, which it is bound to by default.
+@MainActor
+func commandSSavesQuery(fromField fieldFocused: Bool) -> Bool {
+    fieldFocused && proactive && !FUZZY.query.trimmingCharacters(in: .whitespaces).isEmpty
+}
+
+/// Saves a quick filter drafted from the query when its sheet closes, if it has a name and narrows something, and
+/// clears the query it came from since the filter now does that job.
+@MainActor
+func finishQuickFilterDraft(_ draft: QuickFilterDraft) {
+    let f = draft.asFilter
+    let hasContent = f.extensions != nil || f.exclude != nil || f.match != .both || f.folders?.isEmpty == false || f.rawQuery != nil
+    guard !draft.name.trimmed.isEmpty, hasContent else { return }
+    FUZZY.suppressNextSearch = true
+    FUZZY.query = ""
+    saveQuickFilter(draft: draft, originalID: "")
+}
+
+/// The folder filter counterpart of `finishQuickFilterDraft`.
+@MainActor
+func finishFolderFilterDraft(id: String, folders: [FilePath], key: SauceKey) {
+    guard !id.isEmpty, !folders.isEmpty else { return }
+    FUZZY.suppressNextSearch = true
+    FUZZY.query = ""
+    saveFolderFilter(id: id, folders: folders, key: key)
+}
+
+@MainActor
+func saveFolderFilter(
+    id: String, folders: [FilePath], key: SauceKey, originalID: String = "",
+    icon: String? = nil, color: FilterColor? = nil
+) {
+    guard !folders.isEmpty, !id.isEmpty else {
+        return
+    }
+
+    // Reuse the edited filter's stable identity so renaming via the add sheet doesn't recreate it, and keep what the
+    // sheet has no field for.
+    let edited = Defaults[.folderFilters].first { $0.id == originalID }
+    let editedUUID = edited?.uuid ?? UUID().uuidString
+    let maxDepth = edited?.maxDepth
+    let autoOff = edited?.autoOff
+
+    guard key != .escape else {
+        let filter = FolderFilter(id: id, folders: folders, key: nil, maxDepth: maxDepth, icon: icon, color: color, autoOff: autoOff, uuid: editedUUID)
+        let originalFilter = Defaults[.folderFilters].first { $0.id == originalID }
+
+        Defaults[.folderFilters] = Defaults[.folderFilters].without(originalFilter ?? filter) + [filter]
+        FUZZY.folderFilter = filter
+
+        return
+    }
+
+    // Check for existing filter with the same key and set its key to nil
+    let key = key.lowercasedChar.first
+    let filter = FolderFilter(id: id, folders: folders, key: key, maxDepth: maxDepth, icon: icon, color: color, autoOff: autoOff, uuid: editedUUID)
+    let originalFilter = Defaults[.folderFilters].first { $0.id == originalID }
+    // if let key, let existingFilter = Defaults[.quickFilters].first(where: { $0.key == key }) {
+    //     Defaults[.quickFilters] = Defaults[.quickFilters].without(existingFilter) + [existingFilter.withKey(nil)]
+    // }
+    if let key, let existingFilter = Defaults[.folderFilters].first(where: { $0.key == key }), existingFilter != originalFilter {
+        Defaults[.folderFilters] = Defaults[.folderFilters].without([existingFilter, originalFilter ?? filter]) + [existingFilter.withKey(nil), filter]
+        FUZZY.folderFilter = filter
+        return
+    }
+
+    Defaults[.folderFilters] = Defaults[.folderFilters].without(originalFilter ?? filter) + [filter]
+    FUZZY.folderFilter = filter
+}
+
+// MARK: - FlowLayout
+
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = layout(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = layout(proposal: proposal, subviews: subviews)
+        for (idx, pos) in result.positions.enumerated() {
+            subviews[idx].place(at: CGPoint(x: bounds.minX + pos.x, y: bounds.minY + pos.y), proposal: .unspecified)
+        }
+    }
+
+    private func layout(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, positions: [CGPoint]) {
+        let maxWidth = proposal.width ?? .infinity
+        var positions = [CGPoint]()
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                x = 0; y += rowHeight + spacing; rowHeight = 0
+            }
+            positions.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+        }
+        return (CGSize(width: maxWidth, height: y + rowHeight), positions)
+    }
+}
+
+// MARK: - FilterEditorSelection
+
+enum FilterEditorSelection: Hashable {
+    case quickFilters
+    case quickFilter(String) // associated value is the filter's stable `uuid`, not its name
+    case folderFilters
+    case folderFilter(String) // associated value is the filter's stable `uuid`, not its name
+    case disconnectedVolumes
+}
+
+// MARK: - FilterEditorSheet
+
+struct FilterEditorSheet: View {
+    @Environment(\.dismiss) var dismiss
+
+    /// When true, the editor renders without the sheet header/Done button and fills its container.
+    /// Used when embedded inside the Settings window's Filters pane.
+    var embedded = false
+
+    var body: some View {
+        if embedded {
+            editorContent
+        } else {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Filter Editor").font(.headline)
+                    Spacer()
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                }
+                .padding()
+
+                Divider()
+
+                editorContent
+            }
+            .frame(width: 820, height: 580)
+        }
+    }
+
+    @State private var fuzzy = FUZZY
+    /// The first quick filter rather than the list of all of them, which fills the detail with every filter's editor.
+    @State private var selection: FilterEditorSelection? = Defaults[.quickFilters].first.map { .quickFilter($0.uuid) } ?? .quickFilters
+    @Environment(\.colorScheme) private var colorScheme
+
+    @Default(.quickFilters) private var quickFilters
+    @Default(.folderFilters) private var folderFilters
+    @Default(.filterAutoOff) private var filterAutoOff
+    @Default(.filterAutoOffAfter) private var filterAutoOffAfter
+
+    private var defaultAutoOff: Binding<FilterAutoOff> {
+        Binding(
+            get: { FilterAutoOff(enabled: filterAutoOff, after: filterAutoOffAfter) },
+            set: { new in
+                if new.enabled != filterAutoOff {
+                    filterAutoOff = new.enabled
+                }
+                if new.after != filterAutoOffAfter {
+                    filterAutoOffAfter = new.after
+                }
+            }
+        )
+    }
+
+    private var disconnectedVolumes: [FilePath] {
+        fuzzy.disconnectedVolumes.sorted(by: { $0.string < $1.string })
+    }
+
+    private var editorContent: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            VStack(spacing: 0) {
+                detail
+                Divider()
+                // Under the detail like the Scripts pane's action bar, the sidebar keeps its full height.
+                AutoOffRow(title: "Auto-disable filters", autoOff: defaultAutoOff, sliderWidth: 200, fieldWidth: 124)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+        }
+        // Selection keys off the stable `uuid`, so renames keep it intact; only a deletion can leave
+        // the selection dangling, in which case fall back to the list.
+        .onChange(of: quickFilters) { _, new in
+            if case let .quickFilter(uuid) = selection, !new.contains(where: { $0.uuid == uuid }) {
+                selection = .quickFilters
+            }
+        }
+        .onChange(of: folderFilters) { _, new in
+            if case let .folderFilter(uuid) = selection, !new.contains(where: { $0.uuid == uuid }) {
+                selection = .folderFilters
+            }
+        }
+    }
+
+    private var sidebar: some View {
+        List(selection: $selection) {
+            Section("Quick Filters") {
+                NavigationLink(value: FilterEditorSelection.quickFilters) {
+                    Label { Text("All Quick Filters") } icon: { sidebarIcon("slider.horizontal.3", accent: .accentColor) }
+                }
+                ForEach(quickFilters, id: \.uuid) { filter in
+                    NavigationLink(value: FilterEditorSelection.quickFilter(filter.uuid)) {
+                        filterLabel(filter.id, icon: filter.icon ?? "line.3.horizontal.decrease.circle.fill", color: filter.color ?? .forName(filter.id))
+                    }
+                }
+                Button(action: addQuickFilter) {
+                    Label("New Quick Filter", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+            }
+
+            Section("Folder Filters") {
+                NavigationLink(value: FilterEditorSelection.folderFilters) {
+                    Label { Text("All Folder Filters") } icon: { sidebarIcon("folder", accent: .accentColor) }
+                }
+                ForEach(folderFilters, id: \.uuid) { filter in
+                    NavigationLink(value: FilterEditorSelection.folderFilter(filter.uuid)) {
+                        filterLabel(filter.id, icon: filter.icon ?? "folder.fill", color: filter.color ?? .forName(filter.id))
+                    }
+                }
+                Button(action: addFolderFilter) {
+                    Label("New Folder Filter", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+            }
+
+            if !disconnectedVolumes.isEmpty {
+                Section("Other") {
+                    NavigationLink(value: FilterEditorSelection.disconnectedVolumes) {
+                        Label { Text("Disconnected Volumes") } icon: { sidebarIcon("externaldrive.badge.xmark", accent: .gray) }
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .frame(width: 240)
+        .foregroundStyle(.primary)
+    }
+
+    private var detail: some View {
+        Form {
+            switch selection ?? .quickFilters {
+            case .quickFilters:
+                if quickFilters.isEmpty {
+                    emptySection("No quick filters yet")
+                } else {
+                    ForEach(quickFilters, id: \.uuid) { filter in
+                        QuickFilterRow(filter: filter).id(filter.uuid)
+                    }
+                }
+            case let .quickFilter(uuid):
+                if let filter = quickFilters.first(where: { $0.uuid == uuid }) {
+                    QuickFilterRow(filter: filter).id(filter.uuid)
+                } else {
+                    emptySection("Filter not found")
+                }
+            case .folderFilters:
+                if folderFilters.isEmpty {
+                    emptySection("No folder filters yet")
+                } else {
+                    ForEach(folderFilters, id: \.uuid) { filter in
+                        FolderFilterRow(filter: filter).id(filter.uuid)
+                    }
+                }
+            case let .folderFilter(uuid):
+                if let filter = folderFilters.first(where: { $0.uuid == uuid }) {
+                    FolderFilterRow(filter: filter).id(filter.uuid)
+                } else {
+                    emptySection("Filter not found")
+                }
+            case .disconnectedVolumes:
+                if disconnectedVolumes.isEmpty {
+                    emptySection("No disconnected volumes")
+                } else {
+                    Section("Disconnected Volumes") {
+                        ForEach(disconnectedVolumes, id: \.string) { volume in
+                            DisconnectedVolumeRow(volume: volume)
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// A filter in the list with the icon and colour it carries in the search window.
+    private func filterLabel(_ name: String, icon: String, color: FilterColor) -> some View {
+        Label {
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        } icon: {
+            sidebarIcon(icon, accent: color.accent(dark: colorScheme == .dark))
+        }
+    }
+
+    /// A symbol on the pastel disc the filter icons use elsewhere, small enough inside it to keep clear of the edge.
+    private func sidebarIcon(_ symbol: String, accent: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(accent)
+            .frame(width: 20, height: 20)
+            .filterIconBackground(accent: accent, dark: colorScheme == .dark)
+    }
+
+    private func emptySection(_ text: String) -> some View {
+        Section {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 24)
+        }
+    }
+
+    private func addQuickFilter() {
+        let baseID = "New Filter"
+        var id = baseID
+        var i = 2
+        while Defaults[.quickFilters].contains(where: { $0.id == id }) {
+            id = "\(baseID) \(i)"
+            i += 1
+        }
+        let filter = QuickFilter(id: id, extensions: nil, preQuery: nil, dirsOnly: false, key: nil)
+        Defaults[.quickFilters].insert(filter, at: 0)
+        selection = .quickFilter(filter.uuid)
+    }
+
+    private func addFolderFilter() {
+        let baseID = "New Folder"
+        var id = baseID
+        var i = 2
+        while Defaults[.folderFilters].contains(where: { $0.id == id }) {
+            id = "\(baseID) \(i)"
+            i += 1
+        }
+        let filter = FolderFilter(id: id, folders: [], key: nil)
+        Defaults[.folderFilters].insert(filter, at: 0)
+        selection = .folderFilter(filter.uuid)
+    }
+}
+
+// MARK: - Folder Editor
+
+private func folderEditor(folders: Binding<[FilePath]>, emptyText: String, onChange: @escaping () -> Void, onAdd: @escaping () -> Void) -> some View {
+    HStack(alignment: .top, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
+            if folders.wrappedValue.isEmpty {
+                Text(emptyText).font(.system(size: 12)).foregroundStyle(.tertiary).hfill(.trailing)
+            } else {
+                FlowLayout(spacing: 4) {
+                    ForEach(folders.wrappedValue) { folder in
+                        HStack(spacing: 3) {
+                            Text(FuzzyClient.friendlyName(for: folder))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Button(action: {
+                                folders.wrappedValue.removeAll { $0 == folder }
+                                onChange()
+                            }) {
+                                Image(systemName: "xmark.circle.fill").font(.system(size: 9))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.tertiary)
+                        }
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                    }
+                }
+            }
+        }
+        Spacer(minLength: 0)
+        Button(action: onAdd) {
+            Image(systemName: "plus.circle")
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("Add folder")
+        .accessibilityLabel("Add folder")
+    }
+}
+
+// MARK: - QuickFilterDraft
+
+/// Mutable working copy of a `QuickFilter`'s fields, edited by `QuickFilterEditor`.
+struct QuickFilterDraft {
+    init() {}
+    init(from f: QuickFilter) {
+        uuid = f.uuid
+        name = f.id
+        extensions = f.extensions ?? ""
+        exclude = f.exclude ?? ""
+        match = f.match
+        prepend = f.preQuery ?? ""
+        append = f.postQuery ?? ""
+        rawQuery = f.rawQuery
+        folders = f.folders ?? []
+        hotkey = f.key.flatMap { SauceKey(rawValue: $0.lowercased()) } ?? .escape
+        maxDepth = f.maxDepth ?? -1
+        icon = f.icon ?? "line.3.horizontal.decrease.circle.fill"
+        color = f.color ?? .forName(f.id)
+        autoOff = f.autoOff
+    }
+
+    /// Carried so edits preserve the filter's stable identity (see `QuickFilter.uuid`).
+    var uuid = UUID().uuidString
+    var name = ""
+    var extensions = ""
+    var exclude = ""
+    var match: FilterMatch = .both
+    var prepend = "" // added before the user's typed search (preQuery)
+    var append = "" // added after the user's typed search (postQuery)
+    var rawQuery: String? // nil = structured mode
+    var folders: [FilePath] = []
+    var hotkey: SauceKey = .escape
+    var maxDepth: Int = -1
+    var icon = "line.3.horizontal.decrease.circle.fill"
+    var color: FilterColor = .palette[0]
+    var autoOff: FilterAutoOff?
+
+    var asFilter: QuickFilter {
+        QuickFilter(
+            id: name,
+            extensions: extensions.trimmed.isEmpty ? nil : extensions.trimmed,
+            preQuery: prepend.trimmed.isEmpty ? nil : prepend.trimmed,
+            postQuery: append.trimmed.isEmpty ? nil : append.trimmed,
+            dirsOnly: false,
+            folders: folders.isEmpty ? nil : folders,
+            key: hotkey == .escape ? nil : hotkey.lowercasedChar.first,
+            maxDepth: maxDepth < 0 ? nil : maxDepth,
+            exclude: exclude.trimmed.isEmpty ? nil : exclude.trimmed,
+            rawQuery: rawQuery?.trimmed.isEmpty == true ? nil : rawQuery?.trimmed,
+            match: match,
+            icon: icon,
+            color: color,
+            autoOff: autoOff,
+            uuid: uuid
+        )
+    }
+}
+
+// MARK: - QuickFilterEditor
+
+/// Shared Quick Filter editor (used by the Settings list row and the add sheet). Renders three
+/// Form sections: a pinned edit-mode section, the name + structured fields, and hotkey + scope.
+struct QuickFilterEditor: View {
+    @Binding var draft: QuickFilterDraft
+
+    var matchCountText = ""
+    var onEdit: () -> Void = {}
+    var onAddFolder: () -> Void = {}
+    var onDelete: (() -> Void)?
+    /// For the auto-off section, which changes no results. `onEdit` when nil.
+    var onAutoOffEdit: (() -> Void)?
+
+    var body: some View {
+        // Pinned at top so switching modes only changes the sections below it.
+        Section {
+            Picker("Edit mode", selection: modeBinding) {
+                Text("Structured fields").tag(Mode.fields)
+                Text("Raw query").tag(Mode.raw)
+            }
+            .pickerStyle(.segmented)
+            Text("Construct the query using the controls below or edit the raw query directly. They are equivalent as the fields translate into a raw query themselves.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            rawQueryRow
+        } header: {
+            HStack {
+                Text(draft.name.isEmpty ? "Quick Filter" : draft.name).font(.headline)
+                Spacer()
+                if let onDelete {
+                    Button(action: onDelete) { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.red)
+                        .help("Delete filter")
+                        .accessibilityLabel("Delete filter")
+                }
+            }
+        }
+
+        Section {
+            LabeledContent("Icon") {
+                HStack(spacing: 8) {
+                    HueSlider(color: $draft.color)
+                    FilterIconButton(icon: $draft.icon, color: draft.color)
+                }
+                .onChange(of: draft.icon) { onEdit() }
+                .onChange(of: draft.color) { onEdit() }
+            }
+            TextField("Name", text: $draft.name, prompt: Text("Filter name"))
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Name")
+                .onChange(of: draft.name) { onEdit() }
+            if fieldsMode {
+                TextField("Extensions", text: $draft.extensions, prompt: Text("e.g.: .png .jpg .pdf"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Extensions")
+                    .onChange(of: draft.extensions) { onEdit() }
+                TextField("Exclude", text: $draft.exclude, prompt: Text("e.g.: draft .zip node_modules/"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Exclude")
+                    .onChange(of: draft.exclude) { onEdit() }
+                Picker("Match", selection: $draft.match) {
+                    Text("Both").tag(FilterMatch.both)
+                    Text("Files").tag(FilterMatch.files)
+                    Text("Folders").tag(FilterMatch.folders)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: draft.match) { onEdit() }
+                TextField("Prepend", text: $draft.prepend, prompt: Text("Added before your search"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Prepend")
+                    .onChange(of: draft.prepend) { onEdit() }
+                TextField("Append", text: $draft.append, prompt: Text("Added after your search"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Append")
+                    .onChange(of: draft.append) { onEdit() }
+            }
+        }
+
+        Section {
+            LabeledContent("Hotkey") {
+                HStack(spacing: 4) {
+                    Text("\u{2325} +").font(.system(size: 11)).foregroundStyle(.secondary)
+                    DynamicKey(key: $draft.hotkey, recording: $recording, allowedKeys: .ALL_KEYS)
+                        .font(.mono(11, weight: .bold))
+                        .onChange(of: draft.hotkey) { onEdit() }
+                        .frame(width: 28)
+                }
+            }
+            if fieldsMode {
+                Stepper(value: $draft.maxDepth, in: -1 ... 100) {
+                    HStack {
+                        Text("Max depth")
+                        Spacer()
+                        Text(draft.maxDepth < 0 ? "∞" : "\(draft.maxDepth)")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityLabel("Max depth")
+                .accessibilityValue(draft.maxDepth < 0 ? "∞" : "\(draft.maxDepth)")
+                .onChange(of: draft.maxDepth) { onEdit() }
+                .help("Limit results to entries at most N folders below the search root. -1 = unlimited.")
+                LabeledContent("Search in") {
+                    folderEditor(folders: $draft.folders, emptyText: "All locations", onChange: onEdit, onAdd: onAddFolder)
+                }
+            }
+        }
+
+        Section {
+            FilterAutoOffOverride(autoOff: $draft.autoOff)
+                .onChange(of: draft.autoOff) { (onAutoOffEdit ?? onEdit)() }
+        }
+    }
+
+    private enum Mode: Hashable { case fields, raw }
+
+    @State private var recording = false
+
+    private var modeBinding: Binding<Mode> {
+        Binding(
+            get: { draft.rawQuery == nil ? .fields : .raw },
+            set: { newMode in
+                if newMode == .raw {
+                    draft.rawQuery = draft.asFilter.queryString
+                } else {
+                    draft.rawQuery = nil
+                }
+                onEdit()
+            }
+        )
+    }
+
+    private var fieldsMode: Bool {
+        draft.rawQuery == nil
+    }
+    private var preview: String {
+        draft.asFilter.queryString
+    }
+
+    private var rawQueryRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("Raw query").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                if !matchCountText.isEmpty {
+                    Text(matchCountText).font(.mono(11)).foregroundStyle(.tertiary)
+                }
+            }
+            if fieldsMode {
+                // Read-only preview of the compiled query; wraps at spaces (token boundaries).
+                Text(preview.isEmpty ? "everything" : preview)
+                    .font(.mono(11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+            } else {
+                // Single-line editable field, like the search bar (multiline is for reading only).
+                TextField(
+                    "",
+                    text: Binding(get: { draft.rawQuery ?? "" }, set: { draft.rawQuery = $0 }),
+                    prompt: Text("Full query, e.g.: .png in:~/Desktop !draft")
+                )
+                .font(.mono(12))
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: draft.rawQuery) { onEdit() }
+            }
+        }
+    }
+}
+
+// MARK: - QuickFilterRow
+
+struct QuickFilterRow: View {
+    init(filter: QuickFilter) {
+        self.filter = filter
+        _draft = State(initialValue: QuickFilterDraft(from: filter))
+    }
+
+    @EnvironmentObject var env: EnvState
+
+    let filter: QuickFilter
+
+    var body: some View {
+        QuickFilterEditor(
+            draft: $draft,
+            matchCountText: matchCountText,
+            onEdit: { save(); refreshCount() },
+            onAddFolder: addFolder,
+            onDelete: delete,
+            onAutoOffEdit: saveAutoOff
+        )
+        .task { refreshCount() }
+    }
+
+    @State private var draft: QuickFilterDraft
+    @State private var matchCountText = ""
+    @State private var countTask: Task<Void, Never>?
+
+    @Default(.quickFilters) private var quickFilters
+
+    private func refreshCount() {
+        countTask?.cancel()
+        let f = draft.asFilter
+        countTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            if Task.isCancelled {
+                return
+            }
+            let n = await FUZZY.matchCount(
+                query: f.queryString,
+                dirsOnly: f.searchDirsOnly,
+                folders: f.folders ?? [],
+                maxDepth: f.maxDepth
+            )
+            if Task.isCancelled {
+                return
+            }
+            await MainActor.run { matchCountText = n >= 5000 ? "~5000+ results" : "~\(n) results" }
+        }
+    }
+
+    private func save() {
+        guard let idx = quickFilters.firstIndex(where: { $0.uuid == filter.uuid }) else { return }
+        let updated = draft.asFilter
+        quickFilters[idx] = updated
+        if FUZZY.quickFilter?.uuid == filter.uuid {
+            FUZZY.quickFilter = updated
+        }
+    }
+
+    /// Only the saved filter: the timer reads the period from there, and the active copy would search again on every
+    /// step of the slider.
+    private func saveAutoOff() {
+        guard let idx = quickFilters.firstIndex(where: { $0.uuid == filter.uuid }) else { return }
+        quickFilters[idx] = quickFilters[idx].withAutoOff(draft.autoOff)
+    }
+
+    private func delete() {
+        quickFilters.removeAll { $0.uuid == filter.uuid }
+        if FUZZY.quickFilter?.uuid == filter.uuid {
+            FUZZY.quickFilter = nil
+        }
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.begin { response in
+            if response == .OK {
+                for url in panel.urls {
+                    if let path = url.existingFilePath, !draft.folders.contains(path) {
+                        draft.folders.append(path)
+                    }
+                }
+                save()
+                refreshCount()
+            }
+        }
+    }
+}
+
+// MARK: - FolderFilterRow
+
+struct FolderFilterRow: View {
+    init(filter: FolderFilter) {
+        self.filter = filter
+        _name = State(initialValue: filter.id)
+        _folders = State(initialValue: filter.folders)
+        _hotkey = State(initialValue: filter.key.flatMap { SauceKey(rawValue: $0.lowercased()) } ?? .escape)
+        _maxDepth = State(initialValue: filter.maxDepth ?? -1)
+        _icon = State(initialValue: filter.icon ?? "folder.fill")
+        _color = State(initialValue: filter.color ?? .forName(filter.id))
+        _autoOff = State(initialValue: filter.autoOff)
+    }
+
+    @EnvironmentObject var env: EnvState
+
+    let filter: FolderFilter
+
+    var body: some View {
+        Section {
+            TextField("Name", text: $name, prompt: Text("Filter name"))
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit { save() }
+                .onChange(of: nameFocused) { _, focused in
+                    if !focused {
+                        save()
+                    }
+                }
+            LabeledContent("Icon") {
+                HStack(spacing: 8) {
+                    HueSlider(color: $color)
+                    FilterIconButton(icon: $icon, color: color)
+                }
+                .onChange(of: icon) { save() }
+                .onChange(of: color) { save() }
+            }
+            LabeledContent("Folders") {
+                folderEditor(folders: $folders, emptyText: "No folders", onChange: { save(); refreshCount() }, onAdd: addFolder)
+            }
+        } header: {
+            HStack {
+                Text(filter.id).font(.headline)
+                Text(folders.map { FuzzyClient.friendlyName(for: $0) }.joined(separator: ", "))
+                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                if !matchCountText.isEmpty {
+                    Text(matchCountText)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
+                Button(action: delete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.red)
+                .help("Delete filter")
+                .accessibilityLabel("Delete filter")
+            }
+        }
+        .task { refreshCount() }
+
+        Section {
+            Stepper(value: $maxDepth, in: -1 ... 100) {
+                HStack {
+                    Text("Max depth")
+                    Spacer()
+                    Text(maxDepth < 0 ? "∞" : "\(maxDepth)")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityLabel("Max depth")
+            .accessibilityValue(maxDepth < 0 ? "∞" : "\(maxDepth)")
+            .onChange(of: maxDepth) { save(); refreshCount() }
+            .help("Limit results to entries at most N folders below the search root. -1 = unlimited.")
+            LabeledContent("Hotkey") {
+                HStack(spacing: 4) {
+                    Text("\u{2325} +").font(.system(size: 11)).foregroundStyle(.secondary)
+                    DynamicKey(key: $hotkey, recording: $recording, allowedKeys: .ALL_KEYS)
+                        .font(.mono(11, weight: .bold))
+                        .onChange(of: hotkey) { save() }
+                        .frame(width: 28)
+                }
+            }
+        }
+
+        Section {
+            FilterAutoOffOverride(autoOff: $autoOff)
+                .onChange(of: autoOff) { saveAutoOff() }
+        }
+    }
+
+    @State private var name: String
+    @State private var folders: [FilePath]
+    @State private var icon: String
+    @State private var color: FilterColor
+    @State private var hotkey: SauceKey
+    @State private var recording = false
+    @State private var maxDepth: Int
+    @State private var autoOff: FilterAutoOff?
+    @FocusState private var nameFocused: Bool
+    @State private var matchCountText = ""
+    @State private var countTask: Task<Void, Never>?
+
+    @Default(.folderFilters) private var folderFilters
+
+    private func refreshCount() {
+        countTask?.cancel()
+        let currentFolders = folders
+        let currentMaxDepth = maxDepth
+        countTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            if Task.isCancelled {
+                return
+            }
+            let n = await FUZZY.matchCount(
+                query: "",
+                dirsOnly: false,
+                folders: currentFolders,
+                maxDepth: currentMaxDepth < 0 ? nil : currentMaxDepth
+            )
+            if Task.isCancelled {
+                return
+            }
+            await MainActor.run { matchCountText = n >= 5000 ? "~5000+ results" : "~\(n) results" }
+        }
+    }
+
+    private func save() {
+        guard let idx = folderFilters.firstIndex(where: { $0.uuid == filter.uuid }) else { return }
+        let updated = FolderFilter(
+            id: name, folders: folders, key: hotkey == .escape ? nil : hotkey.lowercasedChar.first,
+            maxDepth: maxDepth < 0 ? nil : maxDepth, icon: icon, color: color, autoOff: autoOff, uuid: filter.uuid
+        )
+        folderFilters[idx] = updated
+        if FUZZY.folderFilter?.uuid == filter.uuid {
+            FUZZY.folderFilter = updated
+        }
+    }
+
+    /// Only the saved filter, as for quick filters.
+    private func saveAutoOff() {
+        guard let idx = folderFilters.firstIndex(where: { $0.uuid == filter.uuid }) else { return }
+        folderFilters[idx] = folderFilters[idx].withAutoOff(autoOff)
+    }
+
+    private func delete() {
+        folderFilters.removeAll { $0.uuid == filter.uuid }
+        if FUZZY.folderFilter?.uuid == filter.uuid {
+            FUZZY.folderFilter = nil
+        }
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.begin { response in
+            if response == .OK {
+                for url in panel.urls {
+                    if let path = url.existingFilePath, !folders.contains(path) {
+                        folders.append(path)
+                    }
+                }
+                save()
+            }
+        }
+    }
+}
+
+// MARK: - AutoOffRow
+
+/// A checkbox that turns auto-off off without losing the time, a slider for quick changes and a field for an exact
+/// time in any unit.
+struct AutoOffRow: View {
+    let title: String
+    @Binding var autoOff: FilterAutoOff
+
+    /// nil fills the row. A bar caps it so the slider doesn't stretch across the window.
+    var sliderWidth: CGFloat?
+    var fieldWidth: CGFloat = 140
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Toggle(title, isOn: $autoOff.enabled)
+                .toggleStyle(.checkbox)
+                .fixedSize()
+            Group {
+                Slider(value: position, in: 0 ... Double(AutoOffDuration.anchors.count - 1))
+                    .accessibilityLabel(title)
+                    .accessibilityValue(AutoOffDuration.text(autoOff.after))
+                    .frame(maxWidth: sliderWidth ?? .infinity)
+                AutoOffField(title: title, seconds: $autoOff.after)
+                    .frame(width: fieldWidth)
+                // Text ignores `.disabled`, so it dims with the controls by hand.
+                Text("after search")
+                    .foregroundStyle(isEnabled && autoOff.enabled ? .primary : .tertiary)
+                    .fixedSize()
+            }
+            .disabled(!autoOff.enabled)
+        }
+    }
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    private var position: Binding<Double> {
+        Binding(
+            get: { AutoOffDuration.position(for: autoOff.after) },
+            set: { new in
+                let seconds = AutoOffDuration.seconds(at: new)
+                if seconds != autoOff.after {
+                    autoOff.after = seconds
+                }
+            }
+        )
+    }
+}
+
+// MARK: - AutoOffField
+
+/// The time in the unit that reads best. A new time in any unit applies on Return or when the field loses focus.
+struct AutoOffField: View {
+    let title: String
+
+    @Binding var seconds: TimeInterval
+
+    var body: some View {
+        TextField(title, text: $text)
+            .labelsHidden()
+            .accessibilityLabel(title)
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .monospacedDigit()
+            .focused($focused)
+            .help("Time in the background before a filter turns off")
+            .onSubmit(commit)
+            .onChange(of: focused) { _, focused in
+                if !focused {
+                    commit()
+                }
+            }
+            .onChange(of: seconds) {
+                if !focused {
+                    text = AutoOffDuration.text(seconds)
+                }
+            }
+            .onAppear { text = AutoOffDuration.text(seconds) }
+    }
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private func commit() {
+        if let value = AutoOffDuration.parse(text, current: seconds).map(AutoOffDuration.clamped), value != seconds {
+            seconds = value
+        }
+        text = AutoOffDuration.text(seconds)
+    }
+}
+
+// MARK: - FilterAutoOffOverride
+
+/// A filter's own auto-off. While the filter follows the default, the row shows the default, dimmed.
+struct FilterAutoOffOverride: View {
+    @Binding var autoOff: FilterAutoOff?
+
+    var body: some View {
+        Toggle("Override auto-disable", isOn: overriding)
+        AutoOffRow(title: "Auto-disable", autoOff: value)
+            .disabled(autoOff == nil)
+    }
+
+    @Default(.filterAutoOff) private var defaultEnabled
+    @Default(.filterAutoOffAfter) private var defaultAfter
+
+    private var defaultAutoOff: FilterAutoOff {
+        FilterAutoOff(enabled: defaultEnabled, after: defaultAfter)
+    }
+
+    /// Turning it on starts from the default, so nothing changes until the row does.
+    private var overriding: Binding<Bool> {
+        Binding(
+            get: { autoOff != nil },
+            set: { autoOff = $0 ? defaultAutoOff : nil }
+        )
+    }
+
+    private var value: Binding<FilterAutoOff> {
+        Binding(
+            get: { autoOff ?? defaultAutoOff },
+            set: { new in
+                if autoOff != nil {
+                    autoOff = new
+                }
+            }
+        )
+    }
+}
+
+// MARK: - DisconnectedVolumeRow
+
+struct DisconnectedVolumeRow: View {
+    let volume: FilePath
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "externaldrive.badge.xmark")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(volume.name.string).font(.system(size: 12, weight: .bold))
+                    Text("Disconnected")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.orange)
+                    if let count = fuzzy.volumeEngines[volume]?.count {
+                        Text("\(count.spaced) cached entries")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(volume.shellString)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button("Remove", role: .destructive) {
+                confirmRemoval = true
+            }
+            .buttonStyle(.bordered)
+            .help("Delete cached index for \(volume.name.string)")
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(8)
+        .confirmationDialog(
+            "Remove \(volume.name.string)?",
+            isPresented: $confirmRemoval,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { fuzzy.removeVolume(volume) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The cached index for this volume will be deleted. Reconnect the drive to index it again.")
+        }
+    }
+
+    @State private var fuzzy = FUZZY
+    @State private var confirmRemoval = false
+
+}

@@ -1,0 +1,868 @@
+import Defaults
+import Foundation
+import Lowtech
+import os.log
+
+private let cliLog = Logger(subsystem: "com.lowtechguys.Cling", category: "CLIService")
+
+// MARK: - SearchCoordinator
+
+/// Thread-safe search coordinator for multi-engine queries from any thread.
+final class SearchCoordinator: @unchecked Sendable {
+    struct EngineEntry {
+        let engine: SearchEngine
+        let label: String
+        let scoreBias: Int
+    }
+
+    struct RecentEntry {
+        let path: String
+        let isDir: Bool
+    }
+
+    /// What a request asks the engines for once its saved filters are applied.
+    struct Resolved {
+        let query: String
+        let folderPrefixes: [String]?
+        let dirsOnly: Bool
+    }
+
+    /// Summed on each read, since the live index adds and removes entries without swapping the engines.
+    var count: Int {
+        lock.withLock { _engines }.reduce(0) { $0 + $1.engine.count }
+    }
+    var indexing: Bool {
+        lock.withLock { _indexing }
+    }
+
+    /// Fold suffix into query as extension tokens so multi-suffix works: ".png .jpeg" -> "query .png .jpeg"
+    static func folding(suffix: String?, into query: String) -> String {
+        guard let sfx = suffix, !sfx.isEmpty else { return query }
+        let extTokens = sfx.replacingOccurrences(of: "|", with: " ").replacingOccurrences(of: ",", with: " ")
+            .split(separator: " ").filter { $0.hasPrefix(".") }.map(String.init)
+        guard !extTokens.isEmpty else { return query }
+        return (query.isEmpty ? "" : query + " ") + extTokens.joined(separator: " ")
+    }
+
+    /// The engines `labels` name: a scope by its raw value ("root") or its label ("Root (/usr, ...)"), a drive by its
+    /// name or its /Volumes path.
+    static func engines(named labels: [String], in pool: [EngineEntry]) -> [EngineEntry] {
+        let scopesByRawValue = Dictionary(uniqueKeysWithValues: SearchScope.allCases.map { ($0.rawValue.lowercased(), $0.label) })
+        let names = Set(labels.flatMap { label -> [String] in
+            var raw = label.lowercased()
+            if raw.hasPrefix("/volumes/") {
+                raw = String(raw.dropFirst("/volumes/".count).prefix { $0 != "/" })
+            }
+            return [raw] + (scopesByRawValue[raw].map { [$0.lowercased()] } ?? [])
+        })
+        return pool.filter { names.contains($0.label.lowercased()) }
+    }
+
+    func setIndexing(_ value: Bool) {
+        lock.withLock { _indexing = value }
+    }
+
+    func setRecents(_ recents: [RecentEntry]) {
+        lock.withLock { _recents = recents }
+    }
+
+    func getRecents(maxResults: Int) -> [RecentEntry] {
+        lock.withLock { Array(_recents.prefix(maxResults)) }
+    }
+
+    /// `engines` is what a search with no scopes goes over, the same as the window's; `index` is what scopes are
+    /// looked up in, so naming a scope or a drive still finds its own index while Everything is on.
+    func setEngines(_ engines: [EngineEntry], index: [EngineEntry]) {
+        let retired: [EngineEntry] = lock.withLock {
+            let previous = _engines + _indexEngines
+            _engines = engines
+            _indexEngines = index
+            return previous
+        }
+        // Release the previous engines off the main thread: SearchEngine's deinit frees large index
+        // buffers, and doing that on the main thread during an index swap hung the app (CLING-6).
+        // Engines still present in the new set keep a positive refcount, so only truly retired
+        // engines are deallocated here.
+        if !retired.isEmpty {
+            DispatchQueue.global(qos: .utility).async { _ = retired }
+        }
+    }
+
+    func search(
+        query: String,
+        maxResults: Int = 30,
+        folderPrefixes: [String]? = nil,
+        suffixPattern: String? = nil,
+        dirsOnly: Bool = false,
+        scopeLabels: [String]? = nil,
+        only: [EngineEntry]? = nil,
+        cancelled: (() -> Bool)? = nil
+    ) -> [SearchResult] {
+        let engines = only ?? filteredEngines(scopeLabels: scopeLabels)
+        guard !engines.isEmpty else { return [] }
+
+        let effectiveQuery = Self.folding(suffix: suffixPattern, into: query)
+
+        let n = engines.count
+        let resultStore = UnsafeMutablePointer<[SearchResult]>.allocate(capacity: n)
+        resultStore.initialize(repeating: [], count: n)
+        defer { resultStore.deinitialize(count: n); resultStore.deallocate() }
+
+        let literalDefault = Defaults[.literalSearch]
+        DispatchQueue.concurrentPerform(iterations: n) { idx in
+            resultStore[idx] = engines[idx].engine.search(
+                query: effectiveQuery,
+                maxResults: maxResults,
+                folderPrefixes: folderPrefixes,
+                dirsOnly: dirsOnly,
+                literalDefault: literalDefault,
+                cancelled: cancelled
+            )
+        }
+
+        // Quality gate + Comparable merge + dedup
+        var bestQuality = 0
+        var i = 0
+        while i < n {
+            if let first = resultStore[i].first, first.quality > bestQuality {
+                bestQuality = first.quality
+            }
+            i &+= 1
+        }
+        let minQuality = bestQuality / 3
+
+        var allResults = [SearchResult]()
+        i = 0
+        while i < n {
+            var ri = 0
+            while ri < resultStore[i].count {
+                let r = resultStore[i][ri]
+                if r.quality >= minQuality || r.hasBase {
+                    allResults.append(r)
+                }
+                ri &+= 1
+            }
+            i &+= 1
+        }
+        allResults = allResults.typosAfterTypedMatches()
+        allResults.sort(by: >)
+        var seen = Set<String>()
+        return allResults.prefix(maxResults * 2).filter { seen.insert($0.path).inserted }.prefix(maxResults).map { $0 }
+    }
+
+    /// The engines a search over `scopeLabels` would use, every one when nil.
+    func engines(scopeLabels: [String]?) -> [EngineEntry] {
+        filteredEngines(scopeLabels: scopeLabels)
+    }
+
+    /// The query the search window would run: the typed text inside the quick filter's own tokens, searched in the
+    /// folder filter's folders, built the way `FuzzyClient.performSearch` builds it. A request with neither filter
+    /// keeps its own options.
+    func resolve(_ request: ClingRequest) -> Result<Resolved, ClingError> {
+        var query = request.query ?? ""
+        var folderPrefixes = request.folderPrefixes
+        var dirsOnly = request.dirsOnly ?? false
+        guard request.quickFilter != nil || request.folderFilter != nil else {
+            return .success(Resolved(query: query, folderPrefixes: folderPrefixes, dirsOnly: dirsOnly))
+        }
+        // `constructQuery`, which the window runs on every query before the filter wraps it.
+        query = query.replacingOccurrences(of: "~/", with: "\(HOME.string)/")
+        if let name = request.quickFilter {
+            guard let qf = Defaults[.quickFilters].first(where: { $0.id.lowercased() == name.lowercased() }) else {
+                return .failure(ClingError("no quick filter named '\(name)'. Quick filters: \(Defaults[.quickFilters].map(\.id).joined(separator: ", "))"))
+            }
+            query = [qf.queryPrefix, query, qf.querySuffix].filter { !$0.isEmpty }.joined(separator: " ")
+            dirsOnly = dirsOnly || qf.searchDirsOnly
+        }
+        if let name = request.folderFilter {
+            guard let ff = Defaults[.folderFilters].first(where: { $0.id.lowercased() == name.lowercased() }) else {
+                return .failure(ClingError("no folder filter named '\(name)'. Folder filters: \(Defaults[.folderFilters].map(\.id).joined(separator: ", "))"))
+            }
+            folderPrefixes = (folderPrefixes ?? []) + ff.folders.map(\.string)
+            // The window passes the depth as a parameter; a depth token narrows the same way.
+            if let depth = ff.maxDepth {
+                query += " depth:\(depth)"
+            }
+        }
+        return .success(Resolved(query: query, folderPrefixes: folderPrefixes, dirsOnly: dirsOnly))
+    }
+
+    /// Remove a path from engines. If scopeLabels is provided, only those engines are checked.
+    func removePath(_ path: String, scopeLabels: [String]? = nil) -> [String] {
+        let engines = filteredEngines(scopeLabels: scopeLabels)
+        var removed = [String]()
+        for eng in engines {
+            if eng.engine.removePath(path) {
+                removed.append(eng.label)
+            }
+        }
+        return removed
+    }
+
+    /// Add a path to the best matching engine. If scopeLabels is provided, only those engines are considered.
+    /// Otherwise, the scope is guessed from the path prefix.
+    func addPath(_ path: String, isDir: Bool, scopeLabels: [String]? = nil) -> String? {
+        let engines: [EngineEntry]
+        if let labels = scopeLabels, !labels.isEmpty {
+            engines = filteredEngines(scopeLabels: labels)
+        } else {
+            // Guess scope from path
+            let guessed = guessScope(for: path)
+            let candidates = filteredEngines(scopeLabels: guessed.map { [$0] })
+            engines = candidates.isEmpty ? lock.withLock { _engines } : candidates
+        }
+        for eng in engines {
+            if eng.engine.hasPath(path) {
+                return "\(eng.label) (already exists)"
+            }
+        }
+        guard let eng = engines.first else { return nil }
+        eng.engine.addPath(path, isDir: isDir)
+        return eng.label
+    }
+
+    /// Check which engines contain the path. If scopeLabels is provided, only those engines are checked.
+    func hasPath(_ path: String, scopeLabels: [String]? = nil) -> [String] {
+        let engines = filteredEngines(scopeLabels: scopeLabels)
+        var found = [String]()
+        for eng in engines {
+            if eng.engine.hasPath(path) {
+                found.append(eng.label)
+            }
+        }
+        return found
+    }
+
+    private let lock = NSLock()
+    private var _engines: [EngineEntry] = []
+    /// The scope, drive and recents indexes, which `_engines` holds too unless Everything stands in for them.
+    private var _indexEngines: [EngineEntry] = []
+    private var _recents: [RecentEntry] = []
+    private var _indexing = false
+
+    private func guessScope(for path: String) -> String? {
+        let home = NSHomeDirectory()
+        let libraryPrefix = home + "/Library"
+        if path.hasPrefix(libraryPrefix + "/") || path == libraryPrefix {
+            return "library"
+        }
+        if path.hasPrefix(home + "/") || path == home {
+            return "home"
+        }
+        if path.hasPrefix("/Applications/") || path == "/Applications"
+            || path.hasPrefix("/System/Applications/")
+        {
+            return "applications"
+        }
+        if path.hasPrefix("/System/") || path == "/System" {
+            return "system"
+        }
+        if path.hasPrefix("/usr/") || path.hasPrefix("/bin/") || path.hasPrefix("/sbin/")
+            || path.hasPrefix("/etc/") || path.hasPrefix("/var/") || path.hasPrefix("/opt/")
+        {
+            return "root"
+        }
+        return nil
+    }
+
+    private func filteredEngines(scopeLabels: [String]?) -> [EngineEntry] {
+        let (all, index) = lock.withLock { (_engines, _indexEngines) }
+        guard let labels = scopeLabels, !labels.isEmpty else { return all }
+        return Self.engines(named: labels, in: index.isEmpty ? all : index)
+    }
+
+}
+
+// IPC types (CLING_PORT_ID, ClingCommand, ClingRequest, ClingResponse,
+// ClingSearchResult, ClingScopeStatus, ClingVolumeStatus) live in
+// Shared/ClingIPC.swift so they can be shared between the Cling app and the
+// ClingCLI tool.
+
+private extension Encodable {
+    var jsonData: Data {
+        try! JSONEncoder().encode(self)
+    }
+}
+private extension Decodable {
+    static func from(_ data: Data) -> Self? {
+        try? JSONDecoder().decode(Self.self, from: data)
+    }
+}
+
+// MARK: - CLICalls
+
+enum CLICalls {
+    /// Threads answering calls at once, each serving the port from its own run loop. One used to
+    /// answer every call in turn, so a reindex waiting on the main thread held every search behind
+    /// it. Past this many, calls wait in the port's queue and their sender gives up after its send
+    /// timeout, as they did with one thread.
+    static let listenerThreads = 8
+
+    /// CLI searches still run one at a time. Each one already searches every engine in parallel
+    /// and waits on their locks, so two side by side finish no sooner, and each holds a thread
+    /// per engine while it waits.
+    static let searchLock = NSLock()
+}
+
+@MainActor
+extension FuzzyClient {
+    func startCLIListeners() {
+        startMachPortListener()
+    }
+
+    private func startMachPortListener() {
+        guard cliMachPort == nil else { return }
+        let coordPtr = Unmanaged.passUnretained(searchCoordinator).toOpaque()
+        var context = CFMessagePortContext(version: 0, info: coordPtr, retain: nil, release: nil, copyDescription: nil)
+        guard let port = CFMessagePortCreateLocal(nil, CLING_PORT_ID, { _, _, data, info -> Unmanaged<CFData>? in
+            guard let info else { return nil }
+            let coord = Unmanaged<SearchCoordinator>.fromOpaque(info).takeUnretainedValue()
+            guard let data = data as Data?,
+                  let request = try? JSONDecoder().decode(ClingRequest.self, from: data)
+            else { return nil }
+            let response = FuzzyClient.handleCLIRequest(request, coordinator: coord)
+            let responseData = try! JSONEncoder().encode(response)
+            return Unmanaged.passRetained(responseData as CFData)
+        }, &context, nil) else {
+            cliLog.error("Failed to create Mach port for \(CLING_PORT_ID)")
+            return
+        }
+
+        // One source on several run loops: whichever thread is free takes the next call.
+        let source = CFMessagePortCreateRunLoopSource(nil, port, 0)
+        for index in 1 ... CLICalls.listenerThreads {
+            let thread = Thread {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .defaultMode)
+                CFRunLoopRun()
+            }
+            thread.name = "ClingMachPort \(index)"
+            thread.start()
+        }
+        cliMachPort = port
+        cliLog.info("Mach port listener started on \(CLING_PORT_ID)")
+    }
+
+    // MARK: - Request Handler
+
+    /// Loads the Everything index when needed (waiting up to two minutes), then searches it alone. While its first
+    /// build is still running, what is indexed so far is searched and the response says so.
+    ///
+    /// Everything has no index of a drive, only of the disks mounted now, so a drive named in the scopes is searched
+    /// through its own saved index instead, connected or not, rather than finding nothing. Everything is left out
+    /// when the scopes name only drives.
+    nonisolated static func searchEverything(_ request: ClingRequest, coordinator coord: SearchCoordinator) -> ClingResponse {
+        let scopes = request.scopes ?? []
+        let driveEntries = scopes.isEmpty ? [] : ((try? cliDrives().get())?.engines ?? [])
+        let drives = SearchCoordinator.engines(named: scopes, in: driveEntries)
+        if !drives.isEmpty, scopes.allSatisfy({ !SearchCoordinator.engines(named: [$0], in: driveEntries).isEmpty }) {
+            var only = request
+            only.everything = nil
+            only.allDrives = nil
+            let response = handleCLIRequest(only, coordinator: coord)
+            guard response.error == nil else { return response }
+            return ClingResponse(
+                results: response.results,
+                status: "Everything has no index of external drives, searched their own: \(drives.map(\.label).joined(separator: ", "))",
+                indexCount: response.indexCount,
+                searchMs: response.searchMs
+            )
+        }
+        let deadline = CFAbsoluteTimeGetCurrent() + 120
+        var access = EverythingIndex.CLIAccess.loading
+        while true {
+            access = DispatchQueue.main.sync { MainActor.assumeIsolated { EVERYTHING.cliAccess() } }
+            guard case .loading = access, CFAbsoluteTimeGetCurrent() < deadline else { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        switch access {
+        case .off:
+            return ClingResponse(error: EverythingIndex.offMessage)
+        case .needsPro:
+            return ClingResponse(error: "Everything needs Cling Pro")
+        case .loading:
+            return ClingResponse(error: "the Everything index is still loading")
+        case let .ready(engine, building):
+            let resolved: SearchCoordinator.Resolved
+            switch coord.resolve(request) {
+            case let .success(r): resolved = r
+            case let .failure(error): return ClingResponse(error: error.message)
+            }
+            let t0 = CFAbsoluteTimeGetCurrent()
+            let results = CLICalls.searchLock.withLock {
+                coord.search(
+                    query: resolved.query,
+                    maxResults: request.maxResults ?? 30,
+                    folderPrefixes: resolved.folderPrefixes,
+                    suffixPattern: request.suffixPattern,
+                    dirsOnly: resolved.dirsOnly,
+                    only: [.init(engine: engine, label: "Everything", scoreBias: 0)] + drives
+                )
+            }
+            let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+            return ClingResponse(
+                results: results.map { ClingSearchResult(path: $0.path, isDir: $0.isDir, score: $0.score, quality: $0.quality) },
+                status: building ? "Everything is still being indexed, \(engine.count) files so far" : nil,
+                indexCount: engine.count,
+                searchMs: ms
+            )
+        }
+    }
+
+    /// Searches every external drive's saved index alone, connected or not, the way the window's External drives
+    /// filter does. The status names each drive searched and marks the disconnected ones, so whoever asked can tell
+    /// which drive to go and plug in.
+    ///
+    /// Flags it can't honour widen the search rather than refuse it: scopes are searched alongside the drives, and
+    /// Everything, which has no index of a drive, gives way to the drives' own.
+    nonisolated static func searchDrives(_ request: ClingRequest, coordinator coord: SearchCoordinator) -> ClingResponse {
+        var engines: [SearchCoordinator.EngineEntry]
+        var drives: String
+        switch cliDrives() {
+        case let .success(found): (engines, drives) = found
+        case let .failure(error): return ClingResponse(error: error.message)
+        }
+        let scoped = coord.engines(scopeLabels: request.scopes ?? []).filter { e in !engines.contains { $0.engine === e.engine } }
+        if !scoped.isEmpty, request.scopes?.isEmpty == false {
+            engines += scoped
+            drives += "; also searched \(scoped.map(\.label).joined(separator: ", "))"
+        }
+        if request.everything == true {
+            drives += "; Everything has no index of external drives, searched their own"
+        }
+        let resolved: SearchCoordinator.Resolved
+        switch coord.resolve(request) {
+        case let .success(r): resolved = r
+        case let .failure(error): return ClingResponse(error: error.message)
+        }
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let results = CLICalls.searchLock.withLock {
+            coord.search(
+                query: resolved.query,
+                maxResults: request.maxResults ?? 30,
+                folderPrefixes: resolved.folderPrefixes,
+                suffixPattern: request.suffixPattern,
+                dirsOnly: resolved.dirsOnly,
+                only: engines
+            )
+        }
+        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        return ClingResponse(
+            results: results.map { ClingSearchResult(path: $0.path, isDir: $0.isDir, score: $0.score, quality: $0.quality) },
+            status: "drives: \(drives)",
+            indexCount: engines.reduce(0) { $0 + $1.engine.count },
+            searchMs: ms
+        )
+    }
+
+    /// The drive engines for `--all-drives`, with the drives named and the disconnected ones marked, or why there are
+    /// none to search.
+    nonisolated static func cliDrives() -> Result<(engines: [SearchCoordinator.EngineEntry], names: String), ClingError> {
+        guard proactive else {
+            return .failure(ClingError("Searching external drives needs Cling Pro"))
+        }
+        let (engines, offline) = DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                (
+                    FUZZY.driveEngines.map { SearchCoordinator.EngineEntry(engine: $0.engine, label: $0.label, scoreBias: $0.scoreBias) },
+                    Set(FUZZY.disconnectedVolumes.map(\.name.string))
+                )
+            }
+        }
+        guard !engines.isEmpty else {
+            return .failure(ClingError("no external drive has been indexed yet"))
+        }
+        let names = engines.map { offline.contains($0.label) ? "\($0.label) (disconnected)" : $0.label }
+        return .success((engines, names.joined(separator: ", ")))
+    }
+
+    nonisolated static func handleCLIRequest(_ request: ClingRequest, coordinator coord: SearchCoordinator) -> ClingResponse {
+        if let refusal = mcpRefusal(request) {
+            return ClingResponse(error: refusal)
+        }
+        switch request.command {
+        case .search where request.searchBar == true:
+            var bar = request
+            bar.searchBar = nil
+            var response = handleCLIRequest(bar, coordinator: coord)
+            // The installed apps join in as they do in the bar, unless something narrows the search.
+            let narrowed = request.quickFilter != nil || request.folderFilter != nil || request.folderPrefixes != nil
+                || request.scopes != nil || request.everything == true || request.allDrives == true || request.suffixPattern != nil
+            let found = (response.results ?? []).prefix(FuzzyClient.launcherReach).map(\.path)
+            let apps = narrowed
+                ? []
+                : LauncherApps.shared.matches(request.query ?? "", literalDefault: Defaults[.literalSearch], results: found)
+                    .map { ClingSearchResult(path: $0.path, isDir: true, score: $0.rank, quality: $0.rank) }
+            response.results = response.results.map { FuzzyClient.launcherOrder($0, apps: apps, path: \.path) }
+            return response
+
+        case .search:
+            if request.allDrives == true {
+                return searchDrives(request, coordinator: coord)
+            }
+            if request.everything == true {
+                return searchEverything(request, coordinator: coord)
+            }
+            let resolved: SearchCoordinator.Resolved
+            switch coord.resolve(request) {
+            case let .success(r): resolved = r
+            case let .failure(error): return ClingResponse(error: error.message)
+            }
+            let query = resolved.query
+            let maxResults = request.maxResults ?? 30
+
+            let t0 = CFAbsoluteTimeGetCurrent()
+            let results = CLICalls.searchLock.withLock {
+                coord.search(
+                    query: query,
+                    maxResults: maxResults,
+                    folderPrefixes: resolved.folderPrefixes,
+                    suffixPattern: request.suffixPattern,
+                    dirsOnly: resolved.dirsOnly,
+                    scopeLabels: request.scopes
+                )
+            }
+            let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+
+            cliLog.debug("CLI search: q=\"\(query)\" \(results.count) results in \(ms, format: .fixed(precision: 1))ms")
+
+            return ClingResponse(
+                results: results.map { ClingSearchResult(path: $0.path, isDir: $0.isDir, score: $0.score, quality: $0.quality) },
+                indexCount: coord.count,
+                searchMs: ms
+            )
+
+        case .index where request.everything == true, .reindex where request.everything == true:
+            if let refusal = DispatchQueue.main.sync(execute: { MainActor.assumeIsolated { EVERYTHING.rebuild() } }) {
+                return ClingResponse(error: refusal)
+            }
+            return ClingResponse(status: "indexing everything")
+
+        case .index, .reindex:
+            let scopes = request.scopes?.compactMap { SearchScope(rawValue: $0) }
+            var volumePaths = request.paths?.compactMap(\.filePath) ?? []
+
+            // Synchronously check for conflicts with any in-flight indexing and decide
+            // whether to start a new batch, attach to the existing one, or reject.
+            // 0 = started, 1 = attached, 2 = conflict
+            var decisionKind = 0
+            var decisionMessage = ""
+            var decisionLabels: [String] = []
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                defer { sem.signal() }
+
+                // Resolve unrecognized scope names as volume names
+                if let requestedScopes = request.scopes {
+                    let recognizedScopes = Set(scopes?.map(\.rawValue) ?? [])
+                    for name in requestedScopes where !recognizedScopes.contains(name) {
+                        if let volume = FUZZY.enabledVolumes.first(where: { $0.name.string == name }) {
+                            volumePaths.append(volume)
+                        }
+                    }
+                }
+                let activeScopeIndexing = FUZZY.scopesIndexing
+                let activeVolumeIndexing = FUZZY.volumesIndexing
+                let anyActive = !activeScopeIndexing.isEmpty || !activeVolumeIndexing.isEmpty || FUZZY.indexing
+
+                let requestedScopes = scopes ?? []
+                let requestedVolumes = volumePaths
+
+                if anyActive {
+                    // "Reindex all" while anything is running is a conflict.
+                    if requestedScopes.isEmpty, requestedVolumes.isEmpty {
+                        decisionKind = 2
+                        decisionMessage = "another indexing operation is in progress; wait for it to finish or cancel it first"
+                        return
+                    }
+
+                    // Any requested scope/volume not already in the active batch is a conflict,
+                    // because indexFiles() would silently drop the new request.
+                    let conflictingScopes = requestedScopes.filter { !activeScopeIndexing.contains($0) }
+                    let conflictingVolumes = requestedVolumes.filter { !activeVolumeIndexing.contains($0) }
+
+                    if !conflictingScopes.isEmpty || !conflictingVolumes.isEmpty {
+                        var parts = [String]()
+                        if !conflictingScopes.isEmpty {
+                            parts.append(conflictingScopes.map(\.label).joined(separator: ", "))
+                        }
+                        if !conflictingVolumes.isEmpty {
+                            parts.append(conflictingVolumes.map(\.name.string).joined(separator: ", "))
+                        }
+                        decisionKind = 2
+                        decisionMessage = "cannot start reindex for \(parts.joined(separator: ", ")): another indexing operation is in progress; wait for it to finish or cancel it first"
+                        return
+                    }
+
+                    // Everything requested is already in flight — attach.
+                    decisionKind = 1
+                    decisionLabels = requestedScopes.map(\.label) + requestedVolumes.map(\.name.string)
+                    return
+                }
+
+                // Nothing running: start the requested work.
+                if !requestedVolumes.isEmpty {
+                    for volume in requestedVolumes where FUZZY.enabledVolumes.contains(volume) {
+                        FUZZY.indexVolume(volume)
+                    }
+                }
+                if scopes != nil || requestedVolumes.isEmpty {
+                    FUZZY.refresh(pauseSearch: request.rebuild ?? false, scopes: scopes)
+                }
+                decisionKind = 0
+                decisionLabels = requestedScopes.map(\.label) + requestedVolumes.map(\.name.string)
+            }
+            sem.wait()
+
+            switch decisionKind {
+            case 2:
+                return ClingResponse(error: decisionMessage)
+            case 1:
+                let label = decisionLabels.isEmpty ? "all" : decisionLabels.joined(separator: ", ")
+                return ClingResponse(
+                    status: "already indexing (\(label)); attaching to in-progress operation",
+                    indexCount: coord.count,
+                    state: "indexing"
+                )
+            default:
+                let label = decisionLabels.isEmpty ? "all" : decisionLabels.joined(separator: ", ")
+                return ClingResponse(status: "indexing started (\(label))", indexCount: coord.count)
+            }
+
+        case .cancelIndex:
+            let volumePaths = request.paths?.compactMap(\.filePath) ?? []
+            let cancelScopes = request.scopes != nil
+            mainActor {
+                if !volumePaths.isEmpty {
+                    for volume in volumePaths {
+                        FUZZY.cancelVolumeIndexing(volume: volume)
+                    }
+                } else if cancelScopes {
+                    FUZZY.cancelScopeIndexing()
+                } else {
+                    FUZZY.cancelAllIndexing()
+                }
+            }
+            let what = !volumePaths.isEmpty ? volumePaths.map(\.name.string).joined(separator: ", ") : cancelScopes ? "scopes" : "all"
+            return ClingResponse(status: "cancelled indexing (\(what))", indexCount: coord.count)
+
+        case .status:
+            let c = coord.count
+            var details = ""
+            var stateOut = ""
+            var operationOut: String?
+            var scopeStatuses: [ClingScopeStatus] = []
+            var volumeStatuses: [ClingVolumeStatus] = []
+            var everythingState: String?
+            var everythingCount: Int?
+            var everythingWalked: Int?
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                defer { sem.signal() }
+                var lines = [String]()
+
+                // Overall status
+                let state = FUZZY.indexing ? "indexing" : FUZZY.backgroundIndexing ? "background indexing" : (c > 0 ? "ready" : "empty")
+                stateOut = state
+                lines.append("status: \(state)")
+                lines.append("total: \(c) entries")
+
+                // Scope details
+                let enabledScopes = Defaults[.searchScopes]
+                let ops = FUZZY.ongoingOperations
+                let opCounts = FUZZY.ongoingOperationCounts
+                lines.append("")
+                lines.append("scopes:")
+                for scope in SearchScope.allCases {
+                    let enabled = scope == .cloud ? !FUZZY.cloudRoots.isEmpty : enabledScopes.contains(scope)
+                    let count = FUZZY.scopeEngines[scope]?.count ?? 0
+                    let indexed = FUZZY.scopeEngines[scope] != nil
+                    let scopeKey = "scope:\(scope.rawValue)"
+                    let loadKey = "load:\(scope.rawValue)"
+                    let scopeOp = ops[scopeKey] ?? ops[loadKey]
+                    let scopeOpCount = opCounts[scopeKey] ?? opCounts[loadKey]
+                    let scopeIndexing = scopeOp != nil
+                    let status = !enabled ? "disabled" : scopeIndexing ? (scopeOp ?? "indexing...") : !indexed ? "not indexed" : "\(count) entries"
+                    lines.append("  \(scope.label): \(status)")
+                    let scopeFile = scopeIndexFile(scope)
+                    let lastIndexedAt = scopeFile.exists ? scopeFile.timestamp : nil
+                    scopeStatuses.append(ClingScopeStatus(
+                        name: scope.label,
+                        rawValue: scope.rawValue,
+                        enabled: enabled,
+                        indexed: indexed,
+                        indexing: scopeIndexing,
+                        count: count,
+                        operation: scopeOp,
+                        operationCount: scopeOpCount,
+                        lastIndexedAt: lastIndexedAt
+                    ))
+                }
+
+                // Volume details
+                if !FUZZY.externalVolumes.isEmpty {
+                    lines.append("")
+                    lines.append("volumes:")
+                    for volume in FUZZY.externalVolumes {
+                        let enabled = FUZZY.enabledVolumes.contains(volume)
+                        let volKey = "volume:\(volume.string)"
+                        let volumeOp = ops[volKey]
+                        let volumeOpCount = opCounts[volKey]
+                        let indexing = FUZZY.volumesIndexing.contains(volume) || volumeOp != nil
+                        let count = FUZZY.volumeEngines[volume]?.count ?? 0
+                        let indexed = FUZZY.volumeEngines[volume] != nil
+                        let status = !enabled ? "disabled" : indexing ? (volumeOp ?? "indexing...") : !indexed ? "not indexed" : "\(count) entries"
+                        let following = FUZZY.followingStatus(volume)
+                        let health = FUZZY.followedDriveHealth(volume)?.level.verdict
+                        let unwell = health.flatMap { $0 == DriveHealth.Level.good.verdict ? nil : ", \($0)" } ?? ""
+                        let reindex = FUZZY.volumesNeedingWalk[volume] != nil ? ", needs a reindex" : ""
+                        lines.append("  \(volume.name.string) (\(volume.shellString)): \(status)\(following.map { ", \($0)" } ?? "")\(unwell)\(reindex)")
+                        let volFile = volumeIndexFile(volume)
+                        let lastIndexedAt = volFile.exists ? volFile.timestamp : nil
+                        volumeStatuses.append(ClingVolumeStatus(
+                            name: volume.name.string,
+                            path: volume.shellString,
+                            enabled: enabled,
+                            indexed: indexed,
+                            indexing: indexing,
+                            count: count,
+                            operation: volumeOp,
+                            operationCount: volumeOpCount,
+                            lastIndexedAt: lastIndexedAt,
+                            following: following,
+                            health: health
+                        ))
+                    }
+                }
+
+                lines.append("")
+                if let replay = FUZZY.liveUpdater?.replay {
+                    lines.append(replay.caughtUp
+                        ? "live: following changes (caught up after \(replay.events) events in \(String(format: "%.1f", replay.seconds))s)"
+                        : "live: replaying changes, \(replay.events) events so far")
+                } else {
+                    lines.append("live: off")
+                }
+                everythingState = EVERYTHING.state
+                everythingCount = EVERYTHING.count
+                everythingWalked = EVERYTHING.walking ? EVERYTHING.walked : nil
+                switch EVERYTHING.state {
+                case "unloaded", "off":
+                    lines.append("everything: \(EVERYTHING.state)")
+                case "loading":
+                    lines.append("everything: loading")
+                case "indexing" where !EVERYTHING.building:
+                    lines.append("everything: indexing, \(EVERYTHING.walked) entries walked, \(EVERYTHING.count) searchable until it finishes")
+                default:
+                    lines.append("everything: \(EVERYTHING.state), \(EVERYTHING.count) entries")
+                }
+
+                // Current operation
+                if !FUZZY.operation.isEmpty {
+                    lines.append("")
+                    lines.append("operation: \(FUZZY.operation)")
+                    operationOut = FUZZY.operation
+                }
+
+                details = lines.joined(separator: "\n")
+            }
+            if sem.wait(timeout: .now() + 5) == .timedOut {
+                return ClingResponse(
+                    status: coord.indexing ? "indexing..." : (c > 0 ? "ready" : "empty"),
+                    indexCount: c,
+                    state: coord.indexing ? "indexing" : (c > 0 ? "ready" : "empty")
+                )
+            }
+            return ClingResponse(
+                status: details,
+                indexCount: c,
+                state: stateOut,
+                operation: operationOut,
+                scopes: scopeStatuses,
+                volumes: volumeStatuses,
+                everything: everythingState,
+                everythingCount: everythingCount,
+                everythingWalked: everythingWalked
+            )
+
+        case .recents:
+            let maxResults = request.maxResults ?? 50
+            // Wait for MDQuery to populate (up to 3 seconds)
+            var recents = coord.getRecents(maxResults: maxResults)
+            if recents.isEmpty {
+                for _ in 0 ..< 6 {
+                    Thread.sleep(forTimeInterval: 0.5)
+                    recents = coord.getRecents(maxResults: maxResults)
+                    if !recents.isEmpty {
+                        break
+                    }
+                }
+            }
+            return ClingResponse(
+                results: recents.map { ClingSearchResult(path: $0.path, isDir: $0.isDir, score: 0, quality: 0) },
+                indexCount: coord.count
+            )
+
+        case .indexRemove:
+            guard let paths = request.paths, !paths.isEmpty else {
+                return ClingResponse(error: "no paths specified")
+            }
+            var messages = [String]()
+            for path in paths {
+                let removed = coord.removePath(path, scopeLabels: request.scopes)
+                if removed.isEmpty {
+                    messages.append("\(path): not found in any engine")
+                } else {
+                    messages.append("\(path): removed from \(removed.joined(separator: ", "))")
+                }
+            }
+            mainActor { FUZZY.scheduleSaveIndexes() }
+            return ClingResponse(status: messages.joined(separator: "\n"), indexCount: coord.count)
+
+        case .indexAdd:
+            guard let paths = request.paths, !paths.isEmpty else {
+                return ClingResponse(error: "no paths specified")
+            }
+            var messages = [String]()
+            for path in paths {
+                var isDirectory: ObjCBool = false
+                FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+                if let label = coord.addPath(path, isDir: isDirectory.boolValue, scopeLabels: request.scopes) {
+                    messages.append("\(path): added to \(label)")
+                } else {
+                    messages.append("\(path): no engines available")
+                }
+            }
+            mainActor { FUZZY.scheduleSaveIndexes() }
+            return ClingResponse(status: messages.joined(separator: "\n"), indexCount: coord.count)
+
+        case .indexHas:
+            guard let paths = request.paths, !paths.isEmpty else {
+                return ClingResponse(error: "no paths specified")
+            }
+            var messages = [String]()
+            for path in paths {
+                let found = coord.hasPath(path, scopeLabels: request.scopes)
+                if found.isEmpty {
+                    messages.append("\(path): not found")
+                } else {
+                    messages.append("\(path): found in \(found.joined(separator: ", "))")
+                }
+            }
+            return ClingResponse(status: messages.joined(separator: "\n"), indexCount: coord.count)
+
+        case .explain where request.action == "diagnose", .why, .settings, .filters, .scripts, .volumes, .cloud, .scopes, .ignore, .shortcuts,
+             .everything, .changes:
+            return CLIConfig.handle(request, coordinator: coord)
+
+        case .explain:
+            guard let paths = request.paths, !paths.isEmpty else {
+                return ClingResponse(error: "no paths specified")
+            }
+            let report = paths.map { explainPathExclusion($0, coord: coord) }.joined(separator: "\n\n")
+            return ClingResponse(status: report, indexCount: coord.count)
+
+        case .open:
+            return openPaths(request)
+        }
+    }
+}

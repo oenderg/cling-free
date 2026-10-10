@@ -1,0 +1,177 @@
+# Cling ignore rules for your Home folder. "#" lines are comments.
+# "#:group id=… name=…" headers mark a block of rules so a future settings UI
+# can toggle whole groups. Rules you add yourself land under "#:custom" at the end.
+# Syntax is gitignore: a trailing "/" matches directories, "!" re-includes.
+
+#:group id=macos name=macOS clutter
+.DS_Store
+**/*.sb-*
+
+#:group id=noindex name=Spotlight-hidden folders
+**/*.noindex
+# Keep DEVONthink's imported documents searchable even though they live in a .noindex folder.
+!**/*.dtBase2/Files.noindex/
+
+#:group id=toolchain name=Package & toolchain caches
+.bundler/
+.cargo/git/
+.cargo/registry/
+.cocoapods
+.cpan/
+.gem/
+.gradle/
+.m2/repository/
+.npm/
+.nuget/
+.opam
+.pnpm-store/
+.pub-cache/
+.rustup/toolchains/
+.yarn/
+.stack-work/
+dist-newstyle/
+.deno/
+.bun/install/cache/
+go/pkg/mod/
+Packages/
+Pods/
+
+#:group id=python name=Python
+*.egg-info/
+*.pyc
+.venv/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+#:group id=build name=Build & index artifacts
+.index-build/
+.dat.nosync*
+.stversions/
+.terraform/
+*.xcworkspace/xcuserdata
+**/.local/fsindex*
+**/TextIndex/
+**/SDKExplicitPrecompiledModules/
+**/SourcePackages/
+**/Sublime Text */Index
+
+#:group id=photos name=Photo & video libraries
+**/*.photoslibrary/database
+**/*.photoslibrary/external
+**/*.photoslibrary/internal
+**/*.photoslibrary/private
+**/*.photoslibrary/resources
+**/*.photoslibrary/scopes
+**/*.fcpbundle/**/Render Files/
+**/*.fcpbundle/**/Transcoded Media/
+**/*.fcpbundle/**/Analysis Files/
+**/*.lrdata/
+**/Lightroom/**/Backups/
+Library/Application Support/Adobe/Common/Media Cache Files/
+Library/Application Support/Adobe/Common/Media Cache/
+
+#:group id=ml name=Machine learning & data
+**/wandb/
+**/mlruns/
+.dvc/cache/
+.ollama/models/
+
+#:group id=vm name=Virtual machines & disk images
+*.vmdk
+*.vmem
+*.vmsn
+**/*.pvm/**/*.hds
+**/com.docker.docker/Data
+
+#:group id=devtools name=Developer app state
+**/IconJar*/Backups
+Library/Application Support/Code*/Backups
+Library/Application Support/Code*/CachedData
+Library/Application Support/Code*/User/globalStorage
+Library/Application Support/Code*/User/sync/
+Library/Application Support/Code*/User/workspaceStorage
+Library/Application Support/com.hegenberg.bettertouchtool*/com.mentalfaculty.ensembles.eventdata
+Library/Application Support/com.raycast.macos/index/
+Library/Application Support/com.raycast.macos/posthog.queueFolder/
+
+#:group id=claude-code name=Claude Code
+.claude*/backups/
+.claude*/cache/
+.claude*/debug/
+.claude*/file-history/
+.claude*/ide/
+.claude*/paste-cache/
+.claude*/plugins/**/.in_use/
+.claude*/plugins/.in_use-links/
+.claude*/plugins/store/
+.claude*/session-env/
+.claude*/sessions/
+.claude*/shell-snapshots/
+.claude*/telemetry/
+.claude/context-mode/
+
+#:group id=browser name=Browser caches & state
+*.com.google.Chrome
+**/Cookies-journal
+**/Local Storage/leveldb/
+**/Network Persistent State
+**/TransportSecurity
+Library/**/IndexedDB/
+Library/Application Support/*/WebStorage/
+Library/**/Google/Chrome*/Cache
+Library/**/Google/Chrome*/leveldb
+Library/**/Firefox/Profiles/**/sessionstore-backups
+Library/**/Firefox/Profiles/**/storage/default
+Library/**/Firefox/Profiles/**/storage/permanent
+Library/Application Support/Firefox/Profiles/**/datareporting/
+Library/Application Support/Firefox/Profiles/**/saved-telemetry-pings/
+Library/Application Support/Firefox/Profiles/*/weave/
+
+#:group id=appstate name=App caches & telemetry
+*-shm
+*-wal
+**/.gnupg/*.lock
+**/.gnupg/*.tmp
+**/.gnupg/.#lk*
+**/.gnupg/S.*
+**/sentry/scope*.json
+**/Spotify/Users/*/pending-messages*
+**/wharf/
+.local/state/
+io.tailscale.ipn.macos
+Library/Application Support/*/logs/
+Library/Application Support/*/sentry/
+Library/Application Support/Claude/local-agent-mode-sessions/
+Library/Application Support/Spotify/PersistentCache/
+
+#:group id=library name=User Library caches & data
+Cache
+Caches
+doc
+Library/**/*.chrono-timeline
+Library/**/Data/tmp/
+Library/**/WebKit/
+Library/Application Support/**/.*
+Library/Application Support/com.apple.sharedfilelist/
+Library/Application Support/Knowledge/
+Library/Assistant/SiriVocabulary/**/index-*
+Library/Biome/
+Library/Daemon Containers/
+Library/DataDeliveryServices/
+Library/DuetExpertCenter/
+Library/Group Containers/group.com.apple.coreservices.useractivityd/
+Library/Group Containers/group.com.apple.icloud.searchpartyuseragent/
+Library/Group Containers/group.com.apple.loginwindow.persistent-apps/
+Library/Group Containers/group.com.apple.PegasusConfiguration/
+Library/Group Containers/group.com.apple.usernoted/
+Library/HomeKit/metricsCounters/*.counters
+Library/HTTPStorages/
+Library/IdentityServices/
+Library/Metadata/CoreSpotlight/*/
+Library/Developer/CoreSimulator/
+Library/Developer/Xcode/iOS DeviceSupport/
+Library/Application Support/MobileSync/Backup/
+
+#:custom name=Your rules
