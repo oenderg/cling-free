@@ -105,14 +105,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           VERSION: ${{ steps.v.outputs.version }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
         run: |
           set -euo pipefail
+          # Upstream's own notes for this version go first, unmodified: Sparkle's "what's new" opens this
+          # page. A miss only leaves them out; a release must never fail to publish over it.
+          upstream_notes=$(gh release view "v$VERSION" --repo "$UPSTREAM" --json body -q .body 2>/dev/null || true)
           cat > notes.md <<EOF
-          Cling $VERSION, built from upstream with the Pro gating removed.
+          Cling $VERSION, built from upstream with the Pro gating removed. Source: the [\`unlocked\` branch](https://github.com/$REPO/tree/unlocked) (pristine upstream + \`tools/unlock_pro.py\`).
 
-          Source: the \`unlocked\` branch (pristine upstream + \`tools/unlock_pro.py\`).
-
-          ## Install
+          EOF
+          if [ -n "$upstream_notes" ]; then
+            {
+              printf "## What's new in %s\n\n*Upstream's release notes, unmodified.*\n\n" "$VERSION"
+              printf '%s\n\n---\n\n' "$upstream_notes"
+            } >> notes.md
+          fi
+          cat >> notes.md <<EOF
+          <details>
+          <summary><b>Install</b></summary>
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/$REPO/main/tools/install.sh | bash
@@ -126,7 +137,10 @@ jobs:
           \`xattr -dr com.apple.quarantine /Applications/Cling.app\`. Grant Full Disk Access in
           System Settings > Privacy & Security.
 
-          ## Signing
+          </details>
+
+          <details>
+          <summary><b>Signing</b></summary>
 
           Signed with a self-signed certificate, not notarized. Verify with:
 
@@ -137,10 +151,15 @@ jobs:
           The designated requirement is \`identifier "com.lowtechguys.Cling" and certificate leaf\`,
           which is stable across builds, so permission grants survive updates.
 
-          ## Differences from upstream
+          </details>
+
+          <details>
+          <summary><b>Differences from upstream</b></summary>
 
           Besides the Pro gating, "Send securely" is disabled (its WarpDrop transport is a private
           upstream package) and error reports aren't sent to upstream's Sentry.
+
+          </details>
           EOF
           tag="v$VERSION-unlocked"
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
