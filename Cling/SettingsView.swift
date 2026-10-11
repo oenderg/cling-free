@@ -1,0 +1,2358 @@
+import Defaults
+import LaunchAtLogin
+import Lowtech
+import LowtechIndie
+import LowtechPro
+import LowtechProSentry
+import SwiftUI
+import SymbolPicker
+
+extension Binding<Int> {
+    var d: Binding<Double> {
+        .init(
+            get: { Double(wrappedValue) },
+            set: { wrappedValue = Int($0) }
+        )
+    }
+}
+
+extension Set<SauceKey> {
+    /// Keys offered in the show/hide hotkey recorder: everything in `ALL_KEYS` plus a few non-symbol
+    /// keys (Space, Tab, Return, Delete, arrows) so combos like ⌘Space / ⌥Space can be set. All of
+    /// these register through Carbon (`RegisterEventHotKey`), so no extra permissions are needed.
+    static var showAppKeyChoices: Set<SauceKey> {
+        SauceKey.ALL_KEYS.set.union([.space, .tab, .return, .delete, .upArrow, .downArrow, .leftArrow, .rightArrow])
+    }
+}
+
+let envState = EnvState()
+
+// MARK: - SidebarHue
+
+/// A muted, earthy sidebar colour with a light/dark pair: deeper on the light
+/// sidebar, lifted on the dark one so the glyph keeps its weight either way.
+/// Skin / stone / clay / sage / terracotta tones instead of saturated system
+/// colours, shared across the lowtechguys settings sidebars (keep rcmd, Lunar,
+/// Cling, Clop, Pipiri, Crank in step when the palette changes).
+struct SidebarHue {
+    static let sage = rgb(0.39, 0.49, 0.26, 0.60, 0.66, 0.50)
+    static let dustyBlue = rgb(0.24, 0.43, 0.63, 0.53, 0.64, 0.75)
+    static let periwinkle = rgb(0.41, 0.37, 0.68, 0.62, 0.60, 0.80)
+    static let terracotta = rgb(0.74, 0.35, 0.23, 0.82, 0.52, 0.40)
+    static let skin = rgb(0.74, 0.47, 0.30, 0.80, 0.64, 0.52)
+    static let plum = rgb(0.58, 0.30, 0.55, 0.68, 0.55, 0.67)
+    static let mutedTeal = rgb(0.15, 0.50, 0.45, 0.47, 0.68, 0.63)
+    static let clay = rgb(0.63, 0.40, 0.24, 0.72, 0.57, 0.46)
+    static let stone = rgb(0.45, 0.43, 0.37, 0.66, 0.64, 0.57)
+    static let ochre = rgb(0.78, 0.56, 0.16, 0.83, 0.68, 0.40)
+    static let dustyRose = rgb(0.76, 0.39, 0.40, 0.80, 0.60, 0.58)
+    static let olive = rgb(0.47, 0.47, 0.20, 0.70, 0.69, 0.45)
+
+    let light: Color
+    let dark: Color
+
+    func color(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? dark : light
+    }
+
+    private static func rgb(_ lr: Double, _ lg: Double, _ lb: Double, _ dr: Double, _ dg: Double, _ db: Double) -> SidebarHue {
+        SidebarHue(
+            light: Color(.sRGB, red: lr, green: lg, blue: lb),
+            dark: Color(.sRGB, red: dr, green: dg, blue: db)
+        )
+    }
+
+}
+
+// MARK: - SidebarIcon
+
+/// The category glyph as a soft tinted tile: the earthy hue drives both the
+/// glyph and a low-opacity same-hue background. `.resizable` into a fixed inner
+/// frame keeps every glyph one size with a consistent inset from the tile edge.
+struct SidebarIcon: View {
+    let symbol: String
+    let hue: SidebarHue
+    var dimmed = false
+
+    var body: some View {
+        let color = hue.color(for: scheme)
+        let tileOpacity = (scheme == .dark ? 0.22 : 0.15) * (dimmed ? 0.7 : 1)
+        Image(systemName: symbol)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(color.opacity(dimmed ? 0.55 : 1))
+            .frame(width: 12, height: 12)
+            .frame(width: 20, height: 20)
+            .background(
+                color.opacity(tileOpacity),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+    }
+
+    @Environment(\.colorScheme) private var scheme
+
+}
+
+// MARK: - SettingsCategory
+
+enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general, interface, actionBar, shortcuts, apps, search, volumes, filters, scripts, mcp, webAccess, exclusions, licenseAndUpdates, about
+
+    var id: String {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .interface: "Style"
+        case .actionBar: "Action Bar"
+        case .shortcuts: "Keyboard Shortcuts"
+        case .apps: "Open With"
+        case .search: "Search"
+        case .volumes: "Drives & Volumes"
+        case .filters: "Filters"
+        case .scripts: "Scripts"
+        case .mcp: "MCP"
+        case .webAccess: "File server"
+        case .exclusions: "Excluded Paths"
+        case .licenseAndUpdates: "License & updates"
+        case .about: "About"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .interface: "slider.horizontal.3"
+        case .actionBar: "dock.rectangle"
+        case .shortcuts: "keyboard"
+        case .apps: "app.badge"
+        case .search: "magnifyingglass"
+        case .volumes: "externaldrive"
+        case .filters: "line.3.horizontal.decrease.circle"
+        case .scripts: "terminal"
+        case .mcp: "sparkles"
+        case .webAccess: "network"
+        case .exclusions: "eye.slash"
+        case .licenseAndUpdates: "key"
+        case .about: "info.circle"
+        }
+    }
+
+    var hue: SidebarHue {
+        switch self {
+        case .general: .stone
+        case .interface: .skin
+        case .actionBar: .olive
+        case .shortcuts: .clay
+        case .apps: .periwinkle
+        case .search: .dustyBlue
+        case .volumes: .mutedTeal
+        case .filters: .sage
+        case .scripts: .plum
+        case .mcp: .mutedTeal
+        case .webAccess: .dustyBlue
+        case .exclusions: .terracotta
+        case .licenseAndUpdates: .ochre
+        case .about: .dustyRose
+        }
+    }
+}
+
+// MARK: - SettingsNavigation
+
+/// Drives the Settings sidebar selection so it can be set programmatically — e.g. focusing the
+/// About item before presenting the Paddle licence sheet.
+@MainActor final class SettingsNavigation: ObservableObject {
+    static let shared = SettingsNavigation()
+
+    @Published var selection: SettingsCategory = .general
+}
+
+// MARK: - PreventSidebarCollapse
+
+/// `navigationSplitViewColumnWidth(min:)` only limits live resizing: dragging past
+/// the minimum still snaps the sidebar closed, and without a sidebar toggle there is
+/// no way to bring it back. SwiftUI has no API for this, so forbid collapsing on the
+/// underlying `NSSplitViewController` and expand a sidebar that is already collapsed
+/// (e.g. persisted from a previous session). Lives on the detail column: a collapsed
+/// sidebar's view is out of the hierarchy, so a sidebar-attached helper would never run.
+private struct PreventSidebarCollapse: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        DisablingView()
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DisablingView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            DispatchQueue.main.async { [weak self] in self?.disableSidebarCollapse() }
+        }
+
+        override func layout() {
+            super.layout()
+            disableSidebarCollapse()
+        }
+
+        private func disableSidebarCollapse() {
+            var view = superview
+            while let v = view, !(v is NSSplitView) {
+                view = v.superview
+            }
+            guard let splitView = view as? NSSplitView,
+                  let controller = splitView.delegate as? NSSplitViewController else { return }
+            for item in controller.splitViewItems {
+                item.canCollapse = false
+                if item.isCollapsed {
+                    item.isCollapsed = false
+                }
+            }
+        }
+    }
+
+}
+
+// MARK: - SettingsView
+
+struct SettingsView: View {
+    @EnvironmentObject var env: EnvState
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $nav.selection) {
+                Section {
+                    sidebarRow(.general)
+                    sidebarRow(.interface)
+                    sidebarRow(.actionBar)
+                }
+                Section("Search") {
+                    sidebarRow(.search)
+                    sidebarRow(.filters)
+                    sidebarRow(.volumes)
+                    sidebarRow(.exclusions)
+                }
+                Section("Actions") {
+                    sidebarRow(.shortcuts)
+                    sidebarRow(.apps)
+                    sidebarRow(.scripts)
+                    sidebarRow(.mcp)
+                    sidebarRow(.webAccess)
+                }
+                Section("Support") {
+                    sidebarRow(.licenseAndUpdates)
+                    sidebarRow(.about)
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            detailView
+                // Keep the window title as "Settings" (for the Window menu, Mission Control and
+                // accessibility) rather than tracking the pane; the title text is hidden in the
+                // titlebar via titleVisibility = .hidden in the AppDelegate.
+                .navigationTitle("Settings")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(PreventSidebarCollapse())
+        }
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 820, maxWidth: .infinity, minHeight: 640, maxHeight: .infinity)
+    }
+
+    @ObservedObject private var nav = SettingsNavigation.shared
+
+    @ViewBuilder
+    private var detailView: some View {
+        switch nav.selection {
+        case .general: GeneralSettingsPane().environmentObject(env)
+        case .interface: InterfaceSettingsPane()
+        case .actionBar: ActionBarSettingsPane()
+        case .shortcuts: ShortcutsSettingsPane()
+        case .apps: AppsSettingsPane()
+        case .search: SearchSettingsPane()
+        case .volumes: VolumesSettingsPane()
+        case .filters: FiltersSettingsPane()
+        case .scripts: ScriptsSettingsPane()
+        case .mcp: MCPSettingsPane()
+        case .webAccess: WebAccessSettingsPane()
+        case .exclusions: ExclusionsSettingsPane()
+        case .licenseAndUpdates: LicenseAndUpdatesSettingsPane()
+        case .about: AboutSettingsPane()
+        }
+    }
+
+    private func sidebarRow(_ category: SettingsCategory) -> some View {
+        NavigationLink(value: category) {
+            Label {
+                Text(category.title)
+            } icon: {
+                SidebarIcon(symbol: category.symbol, hue: category.hue)
+            }
+        }
+        .accessibilityIdentifier("settings.sidebar.\(category.rawValue)")
+    }
+
+}
+
+// MARK: - SettingRow
+
+private struct SettingRow<Label: View, Control: View>: View {
+    init(
+        title: String,
+        detail: String? = nil,
+        @ViewBuilder label: @escaping () -> Label = { EmptyView() },
+        @ViewBuilder control: @escaping () -> Control
+    ) {
+        self.title = title
+        self.detail = detail
+        self.label = label
+        self.control = control
+    }
+
+    let title: String
+    let detail: String?
+    @ViewBuilder var label: () -> Label
+    @ViewBuilder var control: () -> Control
+
+    var body: some View {
+        LabeledContent {
+            control()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                if Label.self == EmptyView.self {
+                    Text(title)
+                } else {
+                    label()
+                }
+                if let detail {
+                    Text(LocalizedStringKey(detail))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - DescriptiveToggle
+
+private struct DescriptiveToggle: View {
+    let title: String
+    let detail: String
+
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(title)
+            Text(detail)
+        }
+        // A two-line label in a grouped Form reaches AX unnamed.
+        .accessibilityLabel(title)
+        .accessibilityHint(detail)
+    }
+}
+
+// MARK: - InterfaceSettingsPane
+
+private struct InterfaceSettingsPane: View {
+    // MARK: Body
+
+    var body: some View {
+        Form {
+            Section("Interface") {
+                InterfacePicker()
+                // The picked interface's own: the bar's, or the window's from Settings > Search.
+                Picker("Default results", selection: hotkeyTarget == .searchBar ? $searchBarDefaultResults : $defaultResultsMode) {
+                    ForEach(DefaultResultsMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                if hotkeyTarget == .searchBar {
+                    Toggle("Folder icons", isOn: $searchBarFolderIcons)
+                    Toggle("Pin to desktop", isOn: $searchBarPinned)
+                    if searchBarPinned {
+                        Toggle("Keep above windows", isOn: $searchBarAboveWindows)
+                    }
+                }
+            }
+
+            Section("Window") {
+                SettingRow(
+                    title: "Window style",
+                    detail: "Choose the window background appearance."
+                ) {
+                    Picker("Window style", selection: $windowAppearance) {
+                        ForEach(WindowAppearance.allCases.filter(\.available), id: \.self) { appearance in
+                            Text(appearance.rawValue).tag(appearance)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                SettingRow(
+                    title: "Text size",
+                    detail: "\u{2318}+ / \u{2318}- to change, \u{2318}0 to reset"
+                ) {
+                    Stepper(
+                        value: $fontScale,
+                        in: FontScale.range,
+                        step: FontScale.step
+                    ) {
+                        Text(fontScale.formatted(.percent.precision(.fractionLength(0))))
+                            .monospacedDigit()
+                    }
+                    .accessibilityLabel("Text size")
+                    .fixedSize()
+                }
+
+                Toggle("Dim status bar", isOn: $dimStatusBar)
+                    .accessibilityLabel("Dim status bar")
+                SettingRow(title: "Tint strength when a filter is active") {
+                    HStack(spacing: 8) {
+                        Slider(value: $filterWindowTintStrength, in: 0 ... 1, step: 0.05)
+                            .accessibilityLabel("Tint strength when a filter is active")
+                            .frame(width: 160)
+                        Text(
+                            filterWindowTintStrength > 0
+                                ? filterWindowTintStrength.formatted(.percent.precision(.fractionLength(0)))
+                                : "Off"
+                        )
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(filterWindowTintStrength > 0 ? Color.accentColor : Color.secondary)
+                        .frame(width: 60, alignment: .trailing)
+                        .contentTransition(.numericText())
+                    }
+                    .animation(.snappy(duration: 0.2), value: filterWindowTintStrength)
+                }
+            }
+
+            Section("Status bar") {
+                StatusBarEditor()
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    // MARK: Part A — knob state
+
+    @Default(.hotkeyTarget) private var hotkeyTarget
+    @Default(.searchBarDefaultResults) private var searchBarDefaultResults
+    @Default(.defaultResultsMode) private var defaultResultsMode
+    @Default(.searchBarPinned) private var searchBarPinned
+    @Default(.searchBarAboveWindows) private var searchBarAboveWindows
+    @Default(.searchBarFolderIcons) private var searchBarFolderIcons
+    @Default(.fontScale) private var fontScale
+    @Default(.windowAppearance) private var windowAppearance
+    @Default(.dimStatusBar) private var dimStatusBar
+    @Default(.filterWindowTintStrength) private var filterWindowTintStrength
+}
+
+// MARK: - ActionBarSettingsPane
+
+/// The rows under the results and what goes in them, over a preview of the rows that stays at the bottom while the
+/// settings scroll.
+private struct ActionBarSettingsPane: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("Rows") {
+                    DescriptiveToggle(
+                        title: "Action Bar row",
+                        detail: "The bar of buttons under the results: Open, Copy, Trash, Rename, etc.",
+                        isOn: $showActionRow
+                    )
+                    DescriptiveToggle(
+                        title: "Open With row",
+                        detail: "Quick app shortcuts for opening the selected files.",
+                        isOn: $showOpenWithRow
+                    )
+                    DescriptiveToggle(
+                        title: "Scripts row",
+                        detail: "Run scripts on the selected files.",
+                        isOn: $showScriptRow
+                    )
+                    SettingRow(
+                        title: "Toggle all rows by double-tapping",
+                        detail: anyRowEnabled
+                            ? "Double-tap this modifier key to instantly hide or show all three rows at once."
+                            : "Enable at least one row above to use the double-tap toggle."
+                    ) {
+                        Picker("Toggle all rows by double-tapping", selection: $rowsToggleModifier) {
+                            ForEach(RowToggleModifier.allCases, id: \.self) { modifier in
+                                Text(modifier.label).tag(modifier)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    .disabled(!anyRowEnabled)
+                    .opacity(anyRowEnabled ? 1 : 0.5)
+                }
+
+                // MARK: Part A — toolbar knobs
+
+                Section("Action Bar styling") {
+                    SettingRow(title: "Labels") {
+                        Picker("Labels", selection: $toolbarLabelStyle) {
+                            Text("Icon + Text").tag(ToolbarLabelStyle.iconAndText)
+                            Text("Text only").tag(ToolbarLabelStyle.textOnly)
+                            Text("Icon only").tag(ToolbarLabelStyle.iconOnly)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+
+                    SettingRow(title: "Density") {
+                        Picker("Density", selection: $toolbarDensity) {
+                            Text("Regular").tag(ToolbarDensity.regular)
+                            Text("Compact").tag(ToolbarDensity.compact)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+                .disabled(!showActionRow)
+
+                Section {
+                    DescriptiveToggle(
+                        title: "Show Action Menu",
+                        detail: "The \u{22EF} menu holds actions you keep out of the bar. Shows only when there are overflow actions.",
+                        isOn: $showActionMenu
+                    )
+
+                    DescriptiveToggle(
+                        title: "Show segment dividers",
+                        detail: "Thin separators between action groups",
+                        isOn: $toolbarShowDividers
+                    )
+
+                    DescriptiveToggle(
+                        title: "Show row background",
+                        detail: "Show the material behind the action row",
+                        isOn: $toolbarRowBackground
+                    )
+                }
+                .disabled(!showActionRow)
+
+                // MARK: Sharing
+
+                Section {
+                    SettingRow(title: "Default link expiration") {
+                        Picker("Default link expiration", selection: $defaultLinkExpiration) {
+                            ForEach(LINK_EXPIRATION_PRESETS, id: \.self) { e in
+                                Text(expirationDurationLabel(e)).tag(e)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                } header: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Send Securely")
+                        Text("Share the selected files over a private link that's copied to your clipboard. Files transfer straight from your Mac, so a link works only while you're sharing it and stops when it expires.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                // MARK: Part B — per-action visibility editor
+
+                ForEach(Array(ToolbarAction.segmentOrder.enumerated()), id: \.element) { index, segment in
+                    let actions = ToolbarAction.all.filter { $0.segment == segment }
+                    if !actions.isEmpty {
+                        if index == 0 {
+                            Section {
+                                ForEach(actions) { action in
+                                    placementRow(action)
+                                }
+                            } header: {
+                                Text(segment.title)
+                            } footer: {
+                                Text("Choose where each action lives: the Action Bar, the ⋯ Action Menu, or hidden entirely.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .disabled(!showActionRow)
+                        } else {
+                            Section(segment.title) {
+                                ForEach(actions) { action in
+                                    placementRow(action)
+                                }
+                            }
+                            .disabled(!showActionRow)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+
+            ActionBarPreview()
+        }
+    }
+
+    @Default(.showActionRow) private var showActionRow
+    @Default(.showOpenWithRow) private var showOpenWithRow
+    @Default(.showScriptRow) private var showScriptRow
+    @Default(.rowsToggleModifier) private var rowsToggleModifier
+    @Default(.toolbarLabelStyle) private var toolbarLabelStyle
+    @Default(.toolbarDensity) private var toolbarDensity
+    @Default(.showActionMenu) private var showActionMenu
+    @Default(.toolbarShowDividers) private var toolbarShowDividers
+    @Default(.toolbarRowBackground) private var toolbarRowBackground
+    @Default(.defaultLinkExpiration) private var defaultLinkExpiration
+
+    // MARK: Part B — placement state
+
+    @Default(.barActions) private var barActions
+    @Default(.hiddenActions) private var hiddenActions
+
+    private var anyRowEnabled: Bool {
+        showActionRow || showOpenWithRow || showScriptRow
+    }
+
+    // MARK: Helpers
+
+    private func placementRow(_ action: ToolbarAction) -> some View {
+        LabeledContent {
+            Picker(action.title, selection: toolbarPlacement(for: action.id)) {
+                Label("Action Bar", systemImage: "dock.rectangle").tag(ToolbarPlacement.bar)
+                Label("Action Menu", systemImage: "ellipsis").tag(ToolbarPlacement.more)
+                Label("Hidden", systemImage: "eye.slash").tag(ToolbarPlacement.hidden)
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        } label: {
+            Label(action.title, systemImage: action.systemImage)
+        }
+    }
+
+    private func toolbarPlacement(for id: ActionID) -> Binding<ToolbarPlacement> {
+        Binding(
+            get: {
+                if hiddenActions.contains(id) {
+                    return .hidden
+                }
+                return barActions.contains(id) ? .bar : .more
+            },
+            set: { newValue in
+                var bar = barActions
+                var hidden = hiddenActions
+                bar.removeAll { $0 == id }
+                hidden.remove(id)
+                switch newValue {
+                case .bar: bar.append(id)
+                case .more: break
+                case .hidden: hidden.insert(id)
+                }
+                barActions = bar
+                hiddenActions = hidden
+            }
+        )
+    }
+}
+
+// MARK: - ToolbarPlacement
+
+private enum ToolbarPlacement: String, CaseIterable {
+    case bar, more, hidden
+}
+
+let SELECTION_RESET_PRESETS: [TimeInterval] = [0, 60, 300, 900, 3600]
+
+func selectionResetDetail(_ seconds: TimeInterval) -> String {
+    seconds == 0
+        ? "Keeps the same selected files until a manual selection change."
+        : "Starts with no selection when summoned after \(selectionResetLabel(seconds)) in the background."
+}
+
+func selectionResetLabel(_ seconds: TimeInterval) -> String {
+    switch seconds {
+    case 0: "Never"
+    case ..<3600: "\(Int(seconds / 60)) min"
+    default: "\(Int(seconds / 3600)) hour"
+    }
+}
+
+// MARK: - GeneralSettingsPane
+
+private struct GeneralSettingsPane: View {
+    @EnvironmentObject var env: EnvState
+
+    var body: some View {
+        Form {
+            Section {
+                LaunchAtLogin.Toggle()
+                    .accessibilityLabel("Launch at login")
+            }
+
+            Section {
+                SettingRow(
+                    title: "Window mode",
+                    detail: "Utility: no Dock icon, hides on defocus. Desktop App: regular app window with dock icon."
+                ) {
+                    Picker("Window mode", selection: windowMode) {
+                        ForEach(WindowMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                DescriptiveToggle(
+                    title: "Show Dock icon",
+                    detail: "Show Cling in the Dock as a regular app.",
+                    isOn: $showDockIcon
+                )
+                .onChange(of: showDockIcon) {
+                    NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+                    NSApp.activate(ignoringOtherApps: true)
+                    AppDelegate.shared?.keepSettingsFrontUntil = .now + 2
+                }
+
+                DescriptiveToggle(
+                    title: "Show menu bar icon",
+                    detail: "Click it to summon Cling, click again to hide it.",
+                    isOn: $showMenuBarIcon
+                )
+
+                DescriptiveToggle(
+                    title: "Keep window open when app is in background",
+                    detail: "Don't close the window when clicking outside the app.",
+                    isOn: $keepWindowOpenWhenDefocused
+                )
+            }
+
+            Section("Window") {
+                SettingRow(title: "Show window on") {
+                    Picker("Show window on", selection: $windowDisplay) {
+                        ForEach(WindowDisplay.allCases, id: \.self) { display in
+                            Text(display.label).tag(display)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                SettingRow(title: "Window position") {
+                    Picker("Window position", selection: Binding(
+                        get: { windowPosition == .cursor && windowDisplay != .cursor ? .centered : windowPosition },
+                        set: { windowPosition = $0 }
+                    )) {
+                        ForEach(WindowPosition.allCases.filter { $0 != .cursor || windowDisplay == .cursor }, id: \.self) { position in
+                            Text(position.label).tag(position)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                DescriptiveToggle(
+                    title: "Show window at launch",
+                    detail: "Show the main window when Cling is first launched.",
+                    isOn: $showWindowAtLaunch
+                )
+
+                SettingRow(
+                    title: "Reset selection after",
+                    detail: selectionResetDetail(resetSelectionAfter)
+                ) {
+                    Picker("Reset selection after", selection: $resetSelectionAfter) {
+                        ForEach(SELECTION_RESET_PRESETS, id: \.self) { t in
+                            Text(selectionResetLabel(t)).tag(t)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+
+            Section("Global Hotkey") {
+                DescriptiveToggle(
+                    title: "Enable global hotkey",
+                    detail: "Summon Cling from anywhere with a keyboard shortcut.",
+                    isOn: $enableGlobalHotkey
+                )
+
+                SettingRow(
+                    title: "Hotkey"
+                ) {
+                    HStack(spacing: 6) {
+                        if triggerKeys.onEitherSide {
+                            ModifierKeysView(triggerKeys: $triggerKeys)
+                        } else {
+                            DirectionalModifierView(triggerKeys: $triggerKeys, showFnCaps: false)
+                                .disabled(!enableGlobalHotkey)
+                        }
+                        Text("+").heavy(12)
+                        DynamicKey(key: $showAppKey, recording: $env.recording, allowedKeys: .showAppKeyChoices)
+                    }
+                    .disabled(!enableGlobalHotkey)
+                    .opacity(enableGlobalHotkey ? 1 : 0.5)
+                }
+
+                Toggle("Side-independent modifiers", isOn: eitherSide)
+                    .disabled(!enableGlobalHotkey)
+            }
+
+            Section("Privacy") {
+                SentryToggleRow(
+                    title: "Send error reports",
+                    subtitle: "Share anonymous crash and error reports so issues can be found and fixed faster."
+                )
+            }
+
+            Section("Launchers") {
+                SettingRow(title: "Alfred workflow") {
+                    if Launchers.canInstallAlfredWorkflow {
+                        Button("Install") { Launchers.installAlfredWorkflow() }
+                    } else {
+                        Button("Get Alfred") { NSWorkspace.shared.open(Launchers.alfredSite) }
+                    }
+                }
+                SettingRow(title: "Raycast extension") {
+                    Button("Install") { Launchers.openRaycastExtension() }
+                        .help("Opens the extension in the Raycast Store")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// The sides the hotkey had before Side-independent modifiers went on, so turning it off again gives them back.
+    @State private var oneSideKeys: [TriggerKey]?
+
+    @Default(.showWindowAtLaunch) private var showWindowAtLaunch
+    @Default(.showDockIcon) private var showDockIcon
+    @Default(.showMenuBarIcon) private var showMenuBarIcon
+    @Default(.keepWindowOpenWhenDefocused) private var keepWindowOpenWhenDefocused
+    @Default(.windowDisplay) private var windowDisplay
+    @Default(.windowPosition) private var windowPosition
+    @Default(.resetSelectionAfter) private var resetSelectionAfter
+    @Default(.enableGlobalHotkey) private var enableGlobalHotkey
+    @Default(.showAppKey) private var showAppKey
+    @Default(.triggerKeys) private var triggerKeys
+
+    /// Derived from the modifiers themselves rather than kept apart, so a hotkey set through the CLI or an agent shows
+    /// the same way.
+    private var eitherSide: Binding<Bool> {
+        Binding(
+            get: { triggerKeys.onEitherSide },
+            set: { on in
+                if on {
+                    oneSideKeys = triggerKeys
+                    triggerKeys = triggerKeys.eitherSide
+                } else if let oneSideKeys, oneSideKeys.eitherSide == triggerKeys {
+                    triggerKeys = oneSideKeys
+                } else {
+                    triggerKeys = triggerKeys.oneSide
+                }
+            }
+        )
+    }
+
+    private var windowMode: Binding<WindowMode> {
+        Binding(
+            get: { showDockIcon ? .desktopApp : .utility },
+            set: { mode in
+                switch mode {
+                case .utility:
+                    showDockIcon = false
+                    keepWindowOpenWhenDefocused = false
+                case .desktopApp:
+                    showDockIcon = true
+                    keepWindowOpenWhenDefocused = true
+                }
+                NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+                NSApp.activate(ignoringOtherApps: true)
+                AppDelegate.shared?.keepSettingsFrontUntil = .now + 2
+            }
+        )
+    }
+
+}
+
+// MARK: - ModifierKeysView
+
+/// The hotkey's modifiers held on either side: one key each, in the order menus show them.
+private struct ModifierKeysView: View {
+    @Binding var triggerKeys: [TriggerKey]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(Self.keys.indices, id: \.self) { i in
+                let (key, symbol, name) = Self.keys[i]
+                Button(symbol) {
+                    let toggled = triggerKeys.toggling(key: key)
+                    // Never down to none: an empty list would turn the hotkey off and bring the left and right keys back.
+                    if !toggled.isEmpty {
+                        triggerKeys = toggled
+                    }
+                }
+                .buttonStyle(ToggleButton(isOn: .constant(triggerKeys.contains(key)), radius: 6))
+                .accessibilityLabel(name)
+            }
+        }
+        .fixedSize()
+    }
+
+    private static let keys: [(TriggerKey, String, String)] = [
+        (.ctrl, "⌃", "Control"), (.alt, "⌥", "Option"), (.shift, "⇧", "Shift"), (.cmd, "⌘", "Command"),
+    ]
+}
+
+extension [TriggerKey] {
+    /// Every modifier matches on either side: `cmd` rather than `lcmd` or `rcmd`.
+    var onEitherSide: Bool {
+        !isEmpty && allSatisfy { [.ctrl, .alt, .shift, .cmd, .fn].contains($0) }
+    }
+
+    var eitherSide: [TriggerKey] {
+        map { key -> TriggerKey in
+            switch key {
+            case .lcmd, .rcmd: .cmd
+            case .lalt, .ralt: .alt
+            case .lctrl, .rctrl: .ctrl
+            case .lshift, .rshift: .shift
+            default: key
+            }
+        }.reduce(into: []) { keys, key in
+            if !keys.contains(key) {
+                keys.append(key)
+            }
+        }
+    }
+
+    /// The right side, like Cling's own default, except Control: most Mac keyboards only have it on the left.
+    var oneSide: [TriggerKey] {
+        map { key -> TriggerKey in
+            switch key {
+            case .cmd: .rcmd
+            case .alt: .ralt
+            case .shift: .rshift
+            case .ctrl: .lctrl
+            default: key
+            }
+        }
+    }
+}
+
+// MARK: - AppsSettingsPane
+
+private struct AppsSettingsPane: View {
+    var body: some View {
+        Form {
+            Section("Default Apps") {
+                SettingRow(
+                    title: "Text editor",
+                    detail: "Used for editing text files."
+                ) {
+                    Button(editorApp.filePath?.stem ?? "TextEdit") {
+                        selectApp(type: "Text Editor") { editorApp = $0.path }
+                    }
+                    .truncationMode(.middle)
+                }
+
+                SettingRow(
+                    title: "Terminal",
+                    detail: "Used for running shell commands and opening folders."
+                ) {
+                    Button(terminalApp.filePath?.stem ?? "Terminal") {
+                        selectApp(type: "Terminal") { terminalApp = $0.path }
+                    }
+                    .truncationMode(.middle)
+                }
+
+                DescriptiveToggle(
+                    title: "Enter key pastes paths to frontmost terminal",
+                    detail: "When a terminal app is frontmost, Enter pastes the selected file paths into it instead of opening them. Turn off if you always prefer to open files on Enter.",
+                    isOn: $enterPastesToFrontmostTerminal
+                )
+
+                SettingRow(
+                    title: "Stash / shelf app",
+                    detail: "The Stash action (⌘S) pins files to a Stash section above the results, or hands them to a shelf app like Yoink or Dropover."
+                ) {
+                    Menu(shelfApp == CLING_STASH_APP ? "Cling Stash" : (shelfApp.filePath?.stem ?? "None")) {
+                        Button("Cling Stash (built-in)") { shelfApp = CLING_STASH_APP }
+                        if let detected = detectShelfApp().existingFilePath {
+                            Button(detected.stem ?? detected.name.string) { shelfApp = detected.string }
+                        }
+                        Button("Choose app…") {
+                            selectApp(type: "Shelf") { shelfApp = $0.path }
+                        }
+                    }
+                    .truncationMode(.middle)
+                    .fixedSize()
+                }
+
+                if shelfApp == CLING_STASH_APP {
+                    SettingRow(
+                        title: "Auto-clear stash",
+                        detail: "Remove files from the stash after they've been stashed for this long."
+                    ) {
+                        HStack(spacing: 8) {
+                            Slider(value: stashAutoClearIndex, in: 0 ... Double(STASH_AUTO_CLEAR_PRESETS.count - 1), step: 1)
+                                .accessibilityLabel("Auto-clear stash")
+                                .frame(width: 160)
+                            Text(stashAutoClearLabel(stashAutoClearAfter))
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(stashAutoClearAfter > 0 ? Color.accentColor : Color.secondary)
+                                .frame(width: 60, alignment: .trailing)
+                                .contentTransition(.numericText())
+                        }
+                        .animation(.snappy(duration: 0.2), value: stashAutoClearAfter)
+                    }
+                }
+            }
+
+            Section("Paths") {
+                DescriptiveToggle(
+                    title: "Use `~/` (tilde) in copied paths",
+                    detail: "Replace `/Users/\(NSUserName())/` with `~/` when copying or exporting paths.",
+                    isOn: $copyPathsWithTilde
+                )
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    @Default(.editorApp) private var editorApp
+    @Default(.terminalApp) private var terminalApp
+    @Default(.shelfApp) private var shelfApp
+    @Default(.stashAutoClearAfter) private var stashAutoClearAfter
+
+    @Default(.copyPathsWithTilde) private var copyPathsWithTilde
+    @Default(.enterPastesToFrontmostTerminal) private var enterPastesToFrontmostTerminal
+
+    /// Maps the auto-clear period to its snap-point index so the slider steps are uniform
+    /// while the underlying values are not (hourly, then daily, then weekly).
+    private var stashAutoClearIndex: Binding<Double> {
+        Binding(
+            get: { Double(nearestStashAutoClearPresetIndex(stashAutoClearAfter)) },
+            set: { stashAutoClearAfter = STASH_AUTO_CLEAR_PRESETS[max(0, min(STASH_AUTO_CLEAR_PRESETS.count - 1, Int($0.rounded())))] }
+        )
+    }
+
+    private func selectApp(type: String, onCompletion: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = "Select \(type) App"
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = "/Applications".fileURL
+
+        if panel.runModal() == .OK, let url = panel.url {
+            onCompletion(url)
+        }
+    }
+
+}
+
+// MARK: - SearchSettingsPane
+
+private struct SearchSettingsPane: View {
+    var body: some View {
+        Form {
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Search Scopes")
+                        Text("Choose which locations Cling indexes for search.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if fuzzy.backgroundIndexing || fuzzy.indexing {
+                        Button("Cancel All") { fuzzy.cancelAllIndexing() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    } else {
+                        Button("Reindex All") { fuzzy.refresh(pauseSearch: false) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
+
+                scopeRow(.home, label: "Home", detail: "User home directory (`~`) excluding `~/Library`")
+                scopeRow(.applications, label: "Applications", detail: "`/Applications`, `/System/Applications`")
+                scopeRow(.library, label: "Library", detail: "User library directory (`~/Library`)")
+                proScopeRow(.system, label: "System", detail: "`/System`")
+                proScopeRow(.root, label: "Root", detail: "`/usr`, `/bin`, `/sbin`, `/opt`, `/etc`, `/Library`, `/var`, `/private`")
+
+                Toggle("Watch file events while the app is quit", isOn: $updateWhileClosed)
+                    .onChange(of: updateWhileClosed) { CatchUpAgent.sync() }
+            }
+
+            EverythingSettingsSection()
+
+            Section("Matching") {
+                DescriptiveToggle(
+                    title: "Literal search",
+                    detail: "Words match as typed, not fuzzily. Prefix a word with ' to fuzzy match it.",
+                    isOn: $literalSearch
+                )
+                SettingRow(title: "Minimum query length") {
+                    Picker("Minimum query length", selection: $minQueryLength) {
+                        Text("1").tag(1)
+                        Text("2").tag(2)
+                        Text("3").tag(3)
+                        Text("4").tag(4)
+                        Text("5").tag(5)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+
+            Section("Results") {
+                SettingRow(
+                    title: "Max results",
+                    detail: "Maximum number of results to show in the search results."
+                ) {
+                    Picker("Max results", selection: $maxResultsCount) {
+                        Text("100").tag(100)
+                        Text("500").tag(500)
+                        if proactive {
+                            Text("1000").tag(1000)
+                            Text("2000").tag(2000)
+                            Text("5000").tag(5000)
+                            Text("10000").tag(10000)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                SettingRow(
+                    title: "Default results",
+                    detail: "What to show when no query or filter is active."
+                ) {
+                    HStack(spacing: 6) {
+                        if defaultResultsMode == .runHistory {
+                            Button("Reset") {
+                                RH.clearAll()
+                                FUZZY.updateDefaultResults()
+                            }
+                            .controlSize(.small)
+                        }
+                        Picker("Default results", selection: $defaultResultsMode) {
+                            ForEach(DefaultResultsMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
+                DescriptiveToggle(
+                    title: "Show search hints",
+                    detail: "Cycle example queries in the search field placeholder.",
+                    isOn: $showSearchHints
+                )
+                .onChange(of: showSearchHints) {
+                    searchHintsManuallyEnabled = true
+                }
+            }
+
+            Section("Command Line Tool") {
+                SettingRow(
+                    title: "Command Line Tool",
+                    detail: "Installs `cling` to `~/.local/bin/` for searching from the terminal."
+                ) {
+                    Button(ShellIntegration.isInstalled ? "Reinstall" : "Install") {
+                        cliInstallMessage = ShellIntegration.installCLI()
+                        cliInstallSuccess = ShellIntegration.isInstalled
+                        if cliInstallSuccess, ShellIntegration.needsPathSetup {
+                            showCLIPathAlert = true
+                        } else {
+                            showCLIAlert = true
+                        }
+                    }
+                    .truncationMode(.middle)
+                }
+
+                if ShellIntegration.isInstalled {
+                    Text("Installed at \(CLING_CLI_LINK.shellString)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .alert(
+            cliInstallSuccess ? "CLI Installed" : "Installation Failed",
+            isPresented: $showCLIAlert,
+            actions: {}
+        ) {
+            Text(cliInstallMessage)
+        }
+        .alert("Add to PATH?", isPresented: $showCLIPathAlert) {
+            Button("Add Automatically") {
+                ShellIntegration.addPathToShellConfigs()
+                cliInstallMessage = "\(cliInstallMessage)\n\nPATH updated. Restart your shell to apply."
+                showCLIAlert = true
+            }
+            Button("Copy to Clipboard") {
+                ShellIntegration.copyPathExportToClipboard()
+                cliInstallMessage = "\(cliInstallMessage)\n\nPATH export command copied to clipboard. Paste it into your shell config."
+                showCLIAlert = true
+            }
+            Button("Skip", role: .cancel) {
+                showCLIAlert = true
+            }
+        } message: {
+            Text("\(cliInstallMessage)\n\n~/.local/bin is not in your shell PATH. Add it automatically to your shell config files?")
+        }
+    }
+
+    @State private var fuzzy = FUZZY
+    @State private var showCLIAlert = false
+    @State private var showCLIPathAlert = false
+    @State private var cliInstallMessage = ""
+    @State private var cliInstallSuccess = false
+
+    @Default(.maxResultsCount) private var maxResultsCount
+    @Default(.minQueryLength) private var minQueryLength
+    @Default(.defaultResultsMode) private var defaultResultsMode
+    @Default(.searchScopes) private var searchScopes
+    @Default(.showSearchHints) private var showSearchHints
+    @Default(.searchHintsManuallyEnabled) private var searchHintsManuallyEnabled
+    @Default(.literalSearch) private var literalSearch
+    @Default(.updateWhileClosed) private var updateWhileClosed
+
+    private func scopeRow(_ scope: SearchScope, label: String, detail: LocalizedStringKey) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Toggle(isOn: scope.binding) {
+                // The size goes in the label so the switches line up whatever its width.
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(label)
+                        Text(detail).font(.callout).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    IndexSizeText(bytes: INDEX_SIZES.scope(scope))
+                }
+            }
+            .accessibilityLabel(label)
+            reindexButton(for: scope)
+        }
+        .onAppear { INDEX_SIZES.refresh() }
+    }
+
+    private func proScopeRow(_ scope: SearchScope, label: String, detail: LocalizedStringKey) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Toggle(isOn: scope.binding) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) { Text(label); ProBadge() }
+                        Text(detail).font(.callout).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    IndexSizeText(bytes: INDEX_SIZES.scope(scope))
+                }
+            }
+            .accessibilityLabel(label)
+            .disabled(!proactive)
+            reindexButton(for: scope)
+        }
+    }
+
+    @ViewBuilder
+    private func reindexButton(for scope: SearchScope) -> some View {
+        if !fuzzy.backgroundIndexing, searchScopes.contains(scope) {
+            Button("Reindex") {
+                fuzzy.refresh(pauseSearch: false, scopes: [scope])
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Reindex \(scope.label)")
+        }
+    }
+}
+
+// MARK: - VolumesSettingsPane
+
+private struct VolumesSettingsPane: View {
+    var body: some View {
+        Form {
+            if !fuzzy.cloudLocations.isEmpty {
+                Section {
+                    CloudStorageList()
+                } header: {
+                    HStack {
+                        Text("Cloud Storage")
+                        Spacer()
+                        IndexSizeText(bytes: INDEX_SIZES.scope(.cloud))
+                    }
+                }
+            }
+
+            Section {
+                DescriptiveToggle(
+                    title: "Index new volumes automatically",
+                    detail: "When off, a volume connected for the first time is not indexed until you enable it below. Volumes you've already indexed keep refreshing on their own.",
+                    // The stored setting keeps its old sense, so nobody's choice flips on update.
+                    isOn: Binding(get: { !disableAutomaticVolumeIndexing }, set: { disableAutomaticVolumeIndexing = !$0 })
+                )
+                .disabled(!proactive)
+            }
+
+            Section {
+                VolumeListView().disabled(!proactive)
+            } header: {
+                Text("External Volumes")
+            } footer: {
+                Text("Index external or network drives so their files show up in search. Each volume can have its own `.fsignore`, editable under Exclusions.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !fuzzy.followableVolumes.isEmpty {
+                Section {
+                    DriveLiveUpdatesView().disabled(!proactive)
+                } header: {
+                    Text("Live Updates")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    @State private var fuzzy = FUZZY
+
+    @Default(.disableAutomaticVolumeIndexing) private var disableAutomaticVolumeIndexing
+
+}
+
+// MARK: - FiltersSettingsPane
+
+private struct FiltersSettingsPane: View {
+    var body: some View {
+        FilterEditorSheet(embedded: true)
+    }
+}
+
+// MARK: - ScriptsSettingsPane
+
+private struct ScriptsSettingsPane: View {
+    var body: some View {
+        ScriptEditorSheet(embedded: true)
+    }
+}
+
+// MARK: - ExclusionsSettingsPane
+
+private struct ExclusionsSettingsPane: View {
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                resetAllHeader
+                homeEditor
+                gitignoreSection
+                scopeEditors
+                blocklistEditors
+                volumeIgnoreSection
+            }
+            .padding()
+        }
+    }
+
+    @State private var fuzzy = FUZZY
+    @State private var fsignoreContent: String = (try? String(contentsOf: fsignore.url, encoding: .utf8)) ?? ""
+    @State private var fsignoreSaveTask: DispatchWorkItem?
+    @State private var scopeContents: [String: String] = Dictionary(
+        uniqueKeysWithValues: ScopeIgnore.rootedScopes.map { ($0.rawValue, ScopeIgnore.content(for: $0)) }
+    )
+    @State private var scopeSaveTasks: [String: DispatchWorkItem] = [:]
+    @State private var showResetAllConfirm = false
+
+    @Default(.blockedPrefixes) private var blockedPrefixes
+    @Default(.blockedContains) private var blockedContains
+    @Default(.honorGitignore) private var honorGitignore
+    @Default(.editorApp) private var editorApp
+
+    private var homeBinding: Binding<String> {
+        Binding(
+            get: { fsignoreContent },
+            set: { newVal in
+                fsignoreContent = newVal
+                fsignoreSaveTask?.cancel()
+                let task = DispatchWorkItem {
+                    FUZZY.fsignoreWatchSuppressedUntil = CFAbsoluteTimeGetCurrent() + 5
+                    try? newVal.write(to: fsignore.url, atomically: true, encoding: .utf8)
+                }
+                fsignoreSaveTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: task)
+            }
+        )
+    }
+
+    private var resetAllHeader: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Index Exclusions").font(.system(size: 13, weight: .bold))
+                Text("Toggle whole groups on or off. Open Edit as text under any list for full gitignore control.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(role: .destructive) { showResetAllConfirm = true } label: {
+                Label("Reset All to Default", systemImage: "arrow.counterclockwise")
+            }
+            .controlSize(.small)
+            .confirmationDialog(
+                "Reset all exclusion rules to Cling's defaults?",
+                isPresented: $showResetAllConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Reset All", role: .destructive) { resetAllToDefault() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Replaces the Home ignore file, the global blocklist, and every per-scope ignore file with Cling's built-in rules. Your custom rules in these lists are removed. Volume ignore files are left untouched.")
+            }
+        }
+    }
+
+    private var gitignoreSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $honorGitignore) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Respect each project's .gitignore").font(.system(size: 12, weight: .semibold))
+                        Text(
+                            "While indexing your Home folder, apply every project's own `.gitignore` and `.ignore` files, so build output (like `node_modules`, `target`, `dist`) is skipped per project. Some ignored files (`.env`, built sites) will stop appearing in search."
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityLabel("Respect each project's .gitignore")
+                .toggleStyle(.switch)
+                .onChange(of: honorGitignore) {
+                    FUZZY.refresh(pauseSearch: false, scopes: [.home])
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .groupBoxStyle(SettingsCardGroupBoxStyle())
+    }
+
+    private var scopeEditors: some View {
+        VStack(spacing: 16) {
+            ForEach(ScopeIgnore.rootedScopes, id: \.self) { scope in
+                GroupedIgnoreEditor(
+                    title: "\(scope.label) Ignore File",
+                    subtitle: "Rules for the \(scope.label) scope (stored in Cling's cache, since this root can't hold a `.fsignore`). Patterns are relative to the scope root.",
+                    rawText: scopeBinding(scope),
+                    rawEditorHeight: 120,
+                    applyDisabled: fuzzy.backgroundIndexing,
+                    onApply: {
+                        scopeSaveTasks[scope.rawValue]?.cancel()
+                        ScopeIgnore.write(scopeContents[scope.rawValue] ?? "", for: scope)
+                        FUZZY.refresh(pauseSearch: false, scopes: [scope])
+                    },
+                    defaultText: { ScopeIgnore.bundledTemplate(for: scope) ?? "" }
+                )
+            }
+        }
+    }
+
+    private var homeEditor: some View {
+        GroupedIgnoreEditor(
+            title: "Home Ignore File",
+            subtitle: "gitignore rules applied while indexing your Home and Library folders.",
+            rawText: homeBinding,
+            rawEditorHeight: 200,
+            applyDisabled: fuzzy.backgroundIndexing,
+            showHelpButton: true,
+            onApply: {
+                fsignoreSaveTask?.cancel()
+                FUZZY.fsignoreWatchSuppressedUntil = CFAbsoluteTimeGetCurrent() + 5
+                try? fsignoreContent.write(to: fsignore.url, atomically: true, encoding: .utf8)
+                FUZZY.refresh(pauseSearch: false, scopes: [.home, .library])
+            },
+            defaultText: { (try? String(contentsOf: FS_IGNORE.url, encoding: .utf8)) ?? "" },
+            openExternal: {
+                NSWorkspace.shared.open(
+                    [fsignore.url],
+                    withApplicationAt: editorApp.fileURL ?? "/Applications/TextEdit.app".fileURL!,
+                    configuration: .init(),
+                    completionHandler: { _, _ in }
+                )
+            }
+        )
+    }
+
+    private var blocklistEditors: some View {
+        VStack(spacing: 16) {
+            GroupedIgnoreEditor(
+                title: "Global Blocklist · Prefix matching",
+                subtitle: "Fast matching applied on every scope before the ignore files. Blocks paths that start with any of these strings.",
+                rawText: $blockedPrefixes,
+                rawEditorHeight: 110,
+                applyDisabled: fuzzy.backgroundIndexing,
+                onApply: {
+                    PathBlocklist.shared.rebuild()
+                    FUZZY.refresh(pauseSearch: false)
+                },
+                defaultText: { Defaults.Keys.blockedPrefixes.defaultValue }
+            )
+            GroupedIgnoreEditor(
+                title: "Global Blocklist · Contains matching",
+                subtitle: "Blocks paths containing any of these strings anywhere. Prefix a rule with `!` for an exception (e.g. block `.app/Contents/` but keep `!.app/Contents/MacOS/`).",
+                rawText: $blockedContains,
+                rawEditorHeight: 130,
+                applyDisabled: fuzzy.backgroundIndexing,
+                onApply: {
+                    PathBlocklist.shared.rebuild()
+                    FUZZY.refresh(pauseSearch: false)
+                },
+                defaultText: { Defaults.Keys.blockedContains.defaultValue }
+            )
+        }
+    }
+
+    private var volumeIgnoreSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Volume Ignore Files").font(.system(size: 12, weight: .semibold))
+                    if fuzzy.externalVolumes.isEmpty {
+                        Text("No external volumes connected.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Each volume can have its own `.fsignore` file using gitignore syntax. Paths excluded via the context menu are written here.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !fuzzy.externalVolumes.isEmpty {
+                    ForEach(fuzzy.externalVolumes, id: \.string) { volume in
+                        VolumeIgnoreEditor(volume: volume)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .groupBoxStyle(SettingsCardGroupBoxStyle())
+    }
+
+    private func scopeBinding(_ scope: SearchScope) -> Binding<String> {
+        Binding(
+            get: { scopeContents[scope.rawValue] ?? "" },
+            set: { newVal in
+                scopeContents[scope.rawValue] = newVal
+                scopeSaveTasks[scope.rawValue]?.cancel()
+                let task = DispatchWorkItem { ScopeIgnore.write(newVal, for: scope) }
+                scopeSaveTasks[scope.rawValue] = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: task)
+            }
+        )
+    }
+
+    private func resetAllToDefault() {
+        let homeDefault = (try? String(contentsOf: FS_IGNORE.url, encoding: .utf8)) ?? ""
+        fsignoreContent = homeDefault
+        fsignoreSaveTask?.cancel()
+        FUZZY.fsignoreWatchSuppressedUntil = CFAbsoluteTimeGetCurrent() + 5
+        try? homeDefault.write(to: fsignore.url, atomically: true, encoding: .utf8)
+
+        Defaults.reset(.blockedPrefixes)
+        Defaults.reset(.blockedContains)
+        PathBlocklist.shared.rebuild()
+
+        for scope in ScopeIgnore.rootedScopes {
+            let def = ScopeIgnore.bundledTemplate(for: scope) ?? ""
+            scopeContents[scope.rawValue] = def
+            ScopeIgnore.write(def, for: scope)
+        }
+
+        FUZZY.refresh(pauseSearch: false)
+    }
+
+}
+
+// MARK: - LicenseAndUpdatesSettingsPane
+
+private struct LicenseAndUpdatesSettingsPane: View {
+    @ObservedObject var updateManager = UM
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let pro = PM.pro, let updater = updateManager.updater {
+                Form {
+                    LicenseAndUpdatesView(pro: pro, updater: updater, appName: "Cling", changelogURL: URL(string: "https://files.lowtechguys.com/cling/changelog.html"))
+                }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+            }
+
+            #if DEBUG
+                HStack {
+                    Button("Reset Trial") { AppDelegate.shared?.resetTrial() }
+                    Button("Expire Trial") { AppDelegate.shared?.expireTrial() }
+                    Spacer()
+                }
+                .padding()
+            #endif
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - AboutSettingsPane
+
+private struct AboutSettingsPane: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            AboutView(
+                appName: "Cling",
+                pro: PM.pro,
+                updater: UM.updater,
+                websiteURL: URL(string: "https://lowtechguys.com/cling"),
+                contactURL: URL(string: "https://lowtechguys.com/contact?app=Cling"),
+                discordURL: URL(string: "https://discord.gg/ERxsH9Ek3q"),
+                changelogURL: URL(string: "https://files.lowtechguys.com/cling/changelog.html")
+            )
+
+            #if DEBUG
+                Form {
+                    Section("Scoring Config (Debug)") {
+                        TextEditor(text: $scoringJSON)
+                            .font(.system(size: 11, design: .monospaced))
+                            .contentMargins(6)
+                            .frame(height: 260)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary, lineWidth: 0.5))
+                        HStack {
+                            Button("Apply") {
+                                if let config = ScoringConfig.fromJSON(scoringJSON) {
+                                    config.save()
+                                    reloadScoringConfig()
+                                }
+                            }
+                            Button("Reset to Defaults") {
+                                ScoringConfig.default.save()
+                                reloadScoringConfig()
+                                scoringJSON = ScoringConfig.default.toJSON()
+                            }
+                            Spacer()
+                            if ScoringConfig.fromJSON(scoringJSON) == nil {
+                                Text("Invalid JSON").foregroundColor(.red).font(.system(size: 11))
+                            }
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+            #endif
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @State private var scoringJSON: String = ScoringConfig.load().toJSON()
+
+}
+
+// MARK: - VolumeIgnoreEditor
+
+struct VolumeIgnoreEditor: View {
+    init(volume: FilePath) {
+        self.volume = volume
+        _content = State(initialValue: (try? String(contentsOf: (volume / ".fsignore").url, encoding: .utf8)) ?? "")
+    }
+
+    let volume: FilePath
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "externaldrive")
+                Text(volume.name.string).font(.system(size: 12, weight: .semibold))
+                Text(volume.shellString).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            TextEditor(text: $content)
+                .font(.system(size: 11, design: .monospaced))
+                .contentMargins(6)
+                .frame(height: 120)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary, lineWidth: 0.5))
+                .onChange(of: content) {
+                    saveTask?.cancel()
+                    saveTask = DispatchWorkItem { [content] in
+                        try? content.write(to: fsignorePath.url, atomically: true, encoding: .utf8)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: saveTask!)
+                }
+
+            HStack {
+                Button("Apply & Reindex") {
+                    saveTask?.cancel()
+                    try? content.write(to: fsignorePath.url, atomically: true, encoding: .utf8)
+                    FUZZY.indexVolume(volume)
+                }
+                .controlSize(.small)
+                .disabled(FUZZY.volumesIndexing.contains(volume))
+                .help("Save the ignore file and reindex \(volume.name.string)")
+                Button("Reset to Default") { content = "" }
+                    .controlSize(.small)
+                    .help("Clear this volume's ignore rules (no rules is the default)")
+                Spacer()
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @State private var content = ""
+    @State private var saveTask: DispatchWorkItem?
+
+    private var fsignorePath: FilePath {
+        volume / ".fsignore"
+    }
+
+}
+
+// MARK: - IgnoreHelpText
+
+struct IgnoreHelpText: View {
+    var body: some View {
+        ScrollView {
+            Text("""
+            **Pattern syntax:**
+
+            1. **Wildcards**: You can use asterisks (`*`) as wildcards to match multiple characters or directories at any level. For example, `*.jpg` will match all files with the .jpg extension, such as `image.jpg` or `photo.jpg`. Similarly, `*.pdf` will match any PDF files.
+
+            2. **Directory names**: You can specify directories in patterns by ending the pattern with a slash (/). For instance, `images/` will match all files or directories named "images" or residing within an "images" directory.
+
+            3. **Negation**: Prefixing a pattern with an exclamation mark (!) negates the pattern, instructing the app to include files that would otherwise be excluded. For example, `!important.pdf` would include a file named "important.pdf" even if it satisfies other exclusion patterns.
+
+            4. **Comments**: You can include comments by adding a hash symbol (`#`) at the beginning of the line. These comments are ignored by the app and serve as helpful annotations for humans.
+
+            *More complex patterns can be found in the [gitignore documentation](https://git-scm.com/docs/gitignore#_pattern_format).*
+
+            **Examples:**
+
+            `# Ignore all hidden files starting with a period character (dotfiles)`
+            `.*`
+            ` `
+            `# Ignore all files and subfolders of app bundles`
+            `*.app/*`
+            ` `
+            `# Exclude all files in a "DontSearch" directory`
+            `DontSearch/`
+            ` `
+            `# Exclude all files with the `.temp` extension`
+            `*.temp`
+            ` `
+            `# Exclude invoices (PDF files starting with "invoice-")`
+            `invoice-*.pdf`
+            ` `
+            `# Exclude a specific file named "confidential.pdf"`
+            `confidential.pdf`
+            ` `
+            `# Include a specific file named "important.pdf" even if it matches other patterns`
+            `!important.pdf`
+            """)
+            .foregroundColor(.secondary)
+        }
+    }
+}
+
+import System
+
+let VOLUMES: FilePath = "/Volumes"
+
+extension URL {
+    var volumeName: String? {
+        (try? resourceValues(forKeys: [.volumeNameKey]))?.volumeName
+    }
+    var isLocalVolume: Bool {
+        (try? resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == true
+    }
+    var isRootVolume: Bool {
+        (try? resourceValues(forKeys: [.volumeIsRootFileSystemKey]))?.volumeIsRootFileSystem == true
+    }
+    var isVolume: Bool {
+        guard let vals = try? resourceValues(forKeys: [.isVolumeKey, .volumeIsRootFileSystemKey]) else { return false }
+        return vals.isVolume == true && vals.volumeIsRootFileSystem == false
+    }
+    var volumeIsReadOnly: Bool {
+        guard let vals = try? resourceValues(forKeys: [.volumeIsReadOnlyKey]) else { return false }
+        return vals.volumeIsReadOnly == true
+    }
+}
+
+// MARK: - FilePath + @retroactive Comparable
+
+extension FilePath: @retroactive Comparable {
+    public static func < (lhs: FilePath, rhs: FilePath) -> Bool {
+        lhs.string < rhs.string
+    }
+
+    @MainActor
+    var volume: FilePath? {
+        FUZZY.externalVolumes
+            .filter { self.starts(with: $0) }
+            .max(by: \.components.count)
+    }
+    /// An indexed volume that is currently unmounted. Its index and SMB metadata cache stay
+    /// loaded, so results from it are still valid, they just can't be stat'ed. Not memoized:
+    /// the answer flips on every mount and unmount.
+    @MainActor
+    var disconnectedVolume: FilePath? {
+        guard string.hasPrefix("/Volumes/") else { return nil }
+        return FUZZY.disconnectedVolumes.first { self.starts(with: $0) }
+    }
+
+    /// The volume this path lives on, mounted or not.
+    @MainActor
+    var knownVolume: FilePath? {
+        memoz.volume ?? disconnectedVolume
+    }
+
+    @MainActor
+    var isOnExternalVolume: Bool {
+        guard let volume = memoz.volume else { return false }
+        return !volume.url.isLocalVolume
+    }
+    @MainActor
+    var isOnReadOnlyVolume: Bool {
+        guard let volume = memoz.volume else { return false }
+        return FUZZY.readOnlyVolumes.contains(volume)
+    }
+
+    var enabledVolumeBinding: Binding<Bool> {
+        Binding(
+            get: { !Defaults[.disabledVolumes].contains(self) },
+            set: { enabled in
+                if enabled {
+                    Defaults[.disabledVolumes].removeAll { $0 == self }
+                } else {
+                    Defaults[.disabledVolumes].append(self)
+                }
+            }
+        )
+    }
+    var reindexTimeIntervalBinding: Binding<Double> {
+        Binding(
+            get: { Defaults[.reindexTimeIntervalPerVolume][self] ?? DEFAULT_VOLUME_REINDEX_INTERVAL },
+            set: { Defaults[.reindexTimeIntervalPerVolume][self] = $0 }
+        )
+    }
+}
+
+// MARK: - CloudStorageList
+
+/// iCloud Drive and the folders in ~/Library/CloudStorage, each one on or off. Together they are the cloud scope.
+struct CloudStorageList: View {
+    var body: some View {
+        ForEach(fuzzy.cloudLocations) { location in
+            Toggle(isOn: binding(location)) {
+                HStack(spacing: 8) {
+                    Image(nsImage: location.icon)
+                        .resizable()
+                        .frame(width: 18, height: 18)
+                    Text(location.name)
+                    if let account = location.account {
+                        Text(Self.shownAccount ?? account)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    if let count = fuzzy.cloudListing[location.root.string] {
+                        Text("Listing… \(count.spaced) files")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+        .onAppear { fuzzy.refreshCloudLocations() }
+    }
+
+    #if SEARCHBAR_BENCH
+        /// Screenshots show an invented account instead of the real one: `-searchBarShowcaseCloudAccount alex@example.com`.
+        private static let shownAccount = UserDefaults.standard.string(forKey: "searchBarShowcaseCloudAccount")
+    #else
+        private static let shownAccount: String? = nil
+    #endif
+
+    @State private var fuzzy = FUZZY
+
+    @Default(.disabledCloudLocations) private var disabledCloudLocations
+
+    private func binding(_ location: CloudLocation) -> Binding<Bool> {
+        Binding(
+            get: { !disabledCloudLocations.contains(location.root) },
+            set: { enabled in
+                if enabled {
+                    disabledCloudLocations.removeAll { $0 == location.root }
+                } else if !disabledCloudLocations.contains(location.root) {
+                    disabledCloudLocations.append(location.root)
+                }
+            }
+        )
+    }
+}
+
+// MARK: - VolumeListView
+
+struct VolumeListView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                (
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) { Text("External Volumes"); ProBadge() }
+                        Text("Index external or network drives").font(.system(size: 11)).foregroundColor(.secondary)
+                    }
+                ).fixedSize()
+                Spacer()
+
+                if !fuzzy.enabledVolumes.isEmpty {
+                    if !fuzzy.volumesIndexing.isEmpty {
+                        Button("Cancel All") {
+                            fuzzy.cancelVolumeIndexing()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Button("Reindex All") {
+                            fuzzy.indexVolumes(fuzzy.enabledVolumes)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+
+            if !fuzzy.externalVolumes.isEmpty {
+                ForEach(fuzzy.externalVolumes, id: \.string) { volume in
+                    volumeItem(volume)
+                }
+            }
+
+            let disconnected = fuzzy.disconnectedVolumes.sorted(by: { $0.string < $1.string })
+            if !disconnected.isEmpty {
+                Divider().padding(.vertical, 4)
+                Text("Disconnected Volumes")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(disconnected, id: \.string) { volume in
+                    disconnectedVolumeItem(volume)
+                }
+            }
+        }
+    }
+
+    func volumeItem(_ volume: FilePath) -> some View {
+        VStack(alignment: .leading) {
+            Toggle(isOn: volume.enabledVolumeBinding) {
+                HStack {
+                    VolumeIconButton(volume: volume)
+                    Text(volume.name.string)
+                    Spacer()
+                    Text(volume.shellString)
+                        .monospaced()
+                        .foregroundColor(.secondary)
+                        .truncationMode(.middle)
+                    IndexSizeText(bytes: INDEX_SIZES.volume(volume))
+                    if fuzzy.enabledVolumes.contains(volume) {
+                        if fuzzy.volumesIndexing.contains(volume) {
+                            Button("Cancel") {
+                                fuzzy.cancelVolumeIndexing(volume: volume)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Cancel indexing \(volume.name.string)")
+                        } else {
+                            Button("Reindex") {
+                                fuzzy.indexVolume(volume)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Reindex \(volume.name.string)")
+                        }
+                    }
+                }
+            }
+            ReindexTimeIntervalSlider(volume: volume, interval: Defaults[.reindexTimeIntervalPerVolume][volume] ?? DEFAULT_VOLUME_REINDEX_INTERVAL)
+        }
+        .onAppear { INDEX_SIZES.refresh() }
+    }
+
+    @State private var fuzzy = FUZZY
+
+    @Default(.reindexTimeIntervalPerVolume) private var reindexTimeIntervalPerVolume
+
+    @Default(.disabledVolumes) private var disabledVolumes
+
+    private func disconnectedVolumeItem(_ volume: FilePath) -> some View {
+        HStack {
+            Image(systemName: "externaldrive.badge.xmark").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(volume.name.string)
+                    Text("Disconnected")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.orange)
+                }
+                Text(volume.shellString)
+                    .monospaced()
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            IndexSizeText(bytes: INDEX_SIZES.volume(volume))
+            Button("Remove") {
+                fuzzy.removeVolume(volume)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Delete cached index for \(volume.name.string)")
+        }
+        .padding(.vertical, 2)
+    }
+
+}
+
+// MARK: - VolumeIconButton
+
+/// The icon a drive's paths start with in results, and the picker for it. Without a pick it's the drive's kind's.
+private struct VolumeIconButton: View {
+    let volume: FilePath
+
+    var body: some View {
+        Button { picking = true } label: {
+            Image(systemName: picked ?? kind)
+                .frame(width: 18)
+        }
+        .buttonStyle(.plain)
+        .help("Icon for paths on this drive")
+        .accessibilityLabel("Icon")
+        .sheet(isPresented: $picking) { SymbolPicker(symbol: $volumeIcons[volume]) }
+        .task(id: volume) { kind = await FolderIcons.shared.kindSymbol(of: volume) }
+    }
+
+    @State private var picking = false
+    @State private var kind = "externaldrive"
+
+    @Default(.volumeIcons) private var volumeIcons
+
+    private var picked: String? {
+        volumeIcons[volume]
+    }
+}
+
+// MARK: - DriveLiveUpdatesView
+
+/// Each followed drive's live updates toggle, with what following it has cost over the last minutes, coloured so the
+/// drive keeping Cling busy or answering slowly stands out from the rest.
+struct DriveLiveUpdatesView: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { context in
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                GridRow {
+                    Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    header("Events", "Changes per minute over the last 10 minutes")
+                    header("Per-file latency", "How long the drive takes to answer for each file Cling checks")
+                    header("Slowest event", "Longest a change took to reach search over the last 10 minutes")
+                    header("Busy time", "Processor time Cling spent on this drive's changes over the last 10 minutes")
+                    header("Eject latency", "How long Cling held up the drive's last eject")
+                }
+                // Read at the timeline's date: nothing the rows show is observed, and the timeline redraws only what
+                // depends on its date.
+                ForEach(fuzzy.followableVolumes, id: \.string) { volume in
+                    row(volume, at: context.date)
+                }
+            }
+        }
+    }
+
+    static func perMinute(_ rate: Double) -> String {
+        rate > 0 && rate < 0.5 ? "<1/min" : "\(Int(rate.rounded()).spaced)/min"
+    }
+
+    static func milliseconds(_ ms: Double) -> String {
+        ms < 0.1 ? "<0.1 ms" : ms < 1 ? String(format: "%.1f ms", ms) : "\(Int(ms.rounded())) ms"
+    }
+
+    static func seconds(_ seconds: Double) -> String {
+        seconds < 10 ? String(format: "%.1f s", seconds) : "\(Int(seconds.rounded())) s"
+    }
+
+    static func percent(_ share: Double) -> String {
+        share == 0 ? "0%" : share < 0.005 ? "<1%" : "\(Int((share * 100).rounded()))%"
+    }
+
+    private static let writtenHelp = "Measured while the drive was being written to, when macOS slows Cling's reads to keep out of the way"
+
+    @State private var fuzzy = FUZZY
+
+    @Default(.unfollowedVolumes) private var unfollowedVolumes
+
+    private func header(_ title: String, _ help: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .gridColumnAlignment(.trailing)
+            .help(help)
+    }
+
+    private func row(_ volume: FilePath, at date: Date) -> some View {
+        let on = !unfollowedVolumes.contains(volume)
+        let health = DriveHealth.existing(volume.string)?.snapshot(at: date)
+        let shown = on && fuzzy.volumeWatchers[volume] != nil ? health : nil
+        let catchingUp = fuzzy.volumeWatchers[volume].map { !$0.updater.replay.caughtUp } ?? false
+        let status: String? = fuzzy.volumesIndexing.contains(volume)
+            ? "indexing"
+            : catchingUp
+                ? "catching up"
+                : fuzzy.volumesWaitingForQuiet.contains(volume) ? "waiting for quiet" : fuzzy.volumesNeedingWalk[volume] != nil ? "needs reindex" : nil
+        return GridRow {
+            HStack(spacing: 8) {
+                Toggle(volume.name.string, isOn: followBinding(volume))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                Circle()
+                    .fill(shown.map { Self.color($0.level) } ?? Color.secondary.opacity(0.4))
+                    .frame(width: 8, height: 8)
+                    .accessibilityLabel(!on ? "Live updates off" : shown.map { Self.levelName($0.level) } ?? "")
+                Text(volume.name.string)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let status {
+                    Text(status)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            let live = shown != nil
+            // Taken while something else wrote to the drive, when macOS holds Cling's reads back on purpose.
+            let fileWritten = health?.fileWhileWritten == true
+            let lagWritten = health?.lagWhileWritten == true
+            cell(health.map { Self.perMinute($0.changesPerMinute) }, .primary, live: live)
+                .help(health.map(Self.changesHelp) ?? "")
+            cell(health?.msPerFile.map(Self.milliseconds), fileWritten ? .secondary : health.map { Self.color($0.fileLevel) }, live: live)
+                .help(fileWritten ? Self.writtenHelp : "")
+            // Falling behind counts however the drive was being used.
+            let behind = health.map { $0.behindLevel > .good } ?? false
+            cell(health?.lag.map(Self.seconds), lagWritten && !behind ? .secondary : health.map { Self.color($0.lagLevel) }, live: live)
+                .help(health.flatMap(Self.behindHelp) ?? (lagWritten ? Self.writtenHelp : ""))
+            cell(health.map { Self.percent($0.busy) }, health.map { Self.color($0.busyLevel) }, live: live)
+            cell(health?.lastEject.map(Self.seconds), health.map { Self.color($0.ejectLevel) }, live: true)
+        }
+    }
+
+    /// A value in its colour, dimmed while the drive isn't followed.
+    private func cell(_ text: String?, _ color: Color?, live: Bool) -> some View {
+        Text(text ?? "")
+            .font(.system(size: 12))
+            .monospacedDigit()
+            .foregroundStyle(live ? color ?? .secondary : Color.secondary.opacity(0.6))
+    }
+
+    private static func color(_ level: DriveHealth.Level) -> Color {
+        switch level {
+        case .good: .green
+        case .slow: .orange
+        case .bad: .red
+        }
+    }
+
+    private static func levelName(_ level: DriveHealth.Level) -> String {
+        switch level {
+        case .good: "Healthy"
+        case .slow: "Slow"
+        case .bad: "Struggling"
+        }
+    }
+
+    /// Nil until Cling was behind for half a minute.
+    private static func behindHelp(_ health: DriveHealth.Snapshot) -> String? {
+        let minutes = health.behind * DriveHealth.window / 60
+        guard minutes >= 0.5 else { return nil }
+        return "Over \(Int(DriveHealth.behindAfter)) s behind for \(Int(minutes.rounded())) of the last \(Int(DriveHealth.window / 60)) minutes"
+    }
+
+    private static func changesHelp(_ health: DriveHealth.Snapshot) -> String {
+        let since = "\(health.changes.spaced) since \(health.since.formatted(date: .omitted, time: .shortened))"
+        return health.drops == 0 ? since : "\(since), \(health.drops.spaced) \(health.drops == 1 ? "burst" : "bursts") too fast for macOS to report were walked again"
+    }
+
+    private func followBinding(_ volume: FilePath) -> Binding<Bool> {
+        Binding(
+            get: { !unfollowedVolumes.contains(volume) },
+            set: { on in
+                if on {
+                    unfollowedVolumes.removeAll { $0 == volume }
+                } else if !unfollowedVolumes.contains(volume) {
+                    unfollowedVolumes.append(volume)
+                }
+            }
+        )
+    }
+
+}
+
+// MARK: - ReindexTimeIntervalSlider
+
+struct ReindexTimeIntervalSlider: View {
+    var volume: FilePath
+
+    @State var interval: TimeInterval = DEFAULT_VOLUME_REINDEX_INTERVAL
+
+    var body: some View {
+        HStack {
+            Text("Reindex Interval: ")
+                .round(12)
+            Slider(value: snapped, in: 3600 ... 2_419_200) {
+                Text(interval.humanizedInterval).mono(11)
+                    .frame(width: 150, alignment: .trailing)
+            }
+            .accessibilityLabel("Reindex interval")
+        }
+    }
+
+    /// Clean values the slider is magnetically pulled toward.
+    private static let anchors: [TimeInterval] = [
+        3600, // 1 hour
+        10800, // 3 hours
+        21600, // 6 hours
+        43200, // 12 hours
+        86400, // 1 day
+        172_800, // 2 days
+        259_200, // 3 days
+        604_800, // 1 week
+        1_209_600, // 2 weeks
+        1_814_400, // 3 weeks
+        2_419_200, // 4 weeks
+    ]
+
+    /// Fraction of the gap to the neighbouring anchor within which the handle snaps to that anchor.
+    /// The remaining middle of each gap stays free, rounded to the hour.
+    private static let magneticFraction: TimeInterval = 0.2
+
+    /// Binding that applies magnetic snapping as the handle moves, then persists the result.
+    private var snapped: Binding<TimeInterval> {
+        Binding(
+            get: { interval },
+            set: { raw in
+                let value = Self.magneticValue(for: raw)
+                interval = value
+                Defaults[.reindexTimeIntervalPerVolume][volume] = value
+            }
+        )
+    }
+
+    /// Snaps `raw` to the nearest anchor when it falls inside that anchor's magnetic zone,
+    /// otherwise rounds to the whole hour.
+    private static func magneticValue(for raw: TimeInterval) -> TimeInterval {
+        guard let idx = anchors.indices.min(by: { abs(anchors[$0] - raw) < abs(anchors[$1] - raw) }) else {
+            return (raw / 3600).rounded() * 3600
+        }
+        let nearest = anchors[idx]
+        let radius: TimeInterval = if raw < nearest {
+            (nearest - anchors[max(idx - 1, 0)]) * magneticFraction
+        } else {
+            (anchors[min(idx + 1, anchors.count - 1)] - nearest) * magneticFraction
+        }
+        if abs(raw - nearest) <= radius {
+            return nearest
+        }
+        return (raw / 3600).rounded() * 3600
+    }
+
+}
+
+extension TimeInterval {
+    var humanizedInterval: String {
+        switch self {
+        case 0 ..< 60:
+            return "\(Int(self)) second\(Int(self) > 1 ? "s" : "")"
+        case 60 ..< 3600:
+            let minutes = Int(self / 60)
+            let seconds = Int(self) % 60
+            return seconds == 0
+                ? "\(minutes) minute\(minutes > 1 ? "s" : "")"
+                : "\(minutes) minute\(minutes > 1 ? "s" : "") \(seconds) second\(seconds > 1 ? "s" : "")"
+        case 3600 ..< 86400:
+            let hours = Int(self / 3600)
+            let minutes = Int(self / 60) % 60
+            return minutes == 0
+                ? "\(hours) hour\(hours > 1 ? "s" : "")"
+                : "\(hours) hour\(hours > 1 ? "s" : "") \(minutes) minute\(minutes > 1 ? "s" : "")"
+        case 86400 ..< 604_800:
+            let days = Int(self / 86400)
+            let hours = Int(self / 3600) % 24
+            return hours == 0
+                ? "\(days) day\(days > 1 ? "s" : "")"
+                : "\(days) day\(days > 1 ? "s" : "") \(hours) hour\(hours > 1 ? "s" : "")"
+        case 604_800 ..< 2_419_200:
+            let weeks = Int(self / 604_800)
+            let days = Int(self / 86400) % 7
+            return days == 0
+                ? "\(weeks) week\(weeks > 1 ? "s" : "")"
+                : "\(weeks) week\(weeks > 1 ? "s" : "") \(days) day\(days > 1 ? "s" : "")"
+        default:
+            let months = Int(self / 2_419_200)
+            let weeks = Int(self / 604_800) % 4
+            return weeks == 0
+                ? "\(months) month\(months > 1 ? "s" : "")"
+                : "\(months) month\(months > 1 ? "s" : "") \(weeks) week\(weeks > 1 ? "s" : "")"
+        }
+    }
+}
+
+// MARK: - ProBadge
+
+struct ProBadge: View {
+    var body: some View {
+        Text("PRO")
+            .font(.system(size: 8, weight: .heavy))
+            .foregroundColor(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1.5)
+            .background(RoundedRectangle(cornerRadius: 3, style: .continuous).fill(Color.orange))
+    }
+}
+
+// MARK: - SettingsCardGroupBoxStyle
+
+struct SettingsCardGroupBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.content
+            .padding(10)
+            .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.primary.opacity(0.06), lineWidth: 0.5))
+    }
+}

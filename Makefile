@@ -1,0 +1,152 @@
+define n
+
+
+endef
+
+.EXPORT_ALL_VARIABLES:
+
+NAME=Cling
+BETA=
+DELTAS=5
+
+ifeq (, $(VERSION))
+VERSION=$(shell rg -o --no-filename 'MARKETING_VERSION = ([^;]+).+' -r '$$1' *.xcodeproj/project.pbxproj | head -1 | sd 'b\d+' '')
+endif
+
+ifneq (, $(BETA))
+FULL_VERSION:=$(VERSION)b$(BETA)
+else
+FULL_VERSION:=$(VERSION)
+endif
+
+RELEASE_NOTES_FILES := $(wildcard ReleaseNotes/*.md)
+# Browsers keep release.css for about 12 days, so pages link it with a hash of the live copy and
+# load a new stylesheet as soon as they are rebuilt.
+RELEASE_CSS_URL := https://files.lowtechguys.com/release.css
+RELEASE_CSS = $(RELEASE_CSS_URL)?v=$(shell curl -fsS $(RELEASE_CSS_URL) | md5 -q | cut -c1-8)
+ENV=Release
+DERIVED_DATA_DIR=$(shell ls -td $$HOME/Library/Developer/Xcode/DerivedData/$(NAME)-* | head -1)
+# Sparkle's generate_appcast ships as an SPM binary artifact, not on PATH. Resolve
+# the newest one from the resolved SwiftPM artifacts, falling back to PATH.
+GENERATE_APPCAST=$(or $(shell ls -t $$HOME/Library/Developer/Xcode/DerivedData/$(NAME)-*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast 2>/dev/null | head -1),generate_appcast)
+
+SENTRY_ORG=alin-panaitiu
+SENTRY_PROJECT=cling
+DSYM_DIR=$(DERIVED_DATA_DIR)/Build/Intermediates.noindex/ArchiveIntermediates/$(NAME)/BuildProductsPath/Release/
+DSYM_UUID_FILE=Releases/dsym-uuids.txt
+DSYM_OUT=/tmp/dsyms
+
+.PHONY: build upload release setversion appcast dmg changelog sentry record-dsyms download-dsym
+
+print-%  : ; @echo $* = $($*)
+
+build: SHELL=fish
+build:
+	make-app --build --devid --dmg -s $(NAME) -t $(NAME) -c Release --version $(FULL_VERSION)
+	xcp /tmp/apps/$(NAME)-$(FULL_VERSION).dmg Releases/
+
+dmg: SHELL=fish
+dmg:
+	make-app --dmg -s $(NAME) -t $(NAME) -c Release --version $(FULL_VERSION) /tmp/apps/$(NAME).app
+	xcp /tmp/apps/$(NAME)-$(FULL_VERSION).dmg Releases/
+
+upload:
+	rsync -avzP Releases/*.{delta,dmg} hetzner:/static/lowtechguys/releases/ || true
+	rsync -avz Releases/*.html hetzner:/static/lowtechguys/ReleaseNotes/
+	rsync -avzP Releases/appcast.xml Releases/changelog.html hetzner:/static/lowtechguys/cling/
+	cfcli -d lowtechguys.com purge
+ifeq (, $(BETA))
+	$(MAKE) sentry
+endif
+
+CHANGELOG.md: $(RELEASE_NOTES_FILES)
+	tail -n +1 $$(ls ReleaseNotes/*.md | egrep '/[0-9]+(\.[0-9]+)*\.md$$' $(if $(BETA),| egrep -v '/$(VERSION)\.md$$') | sort -Vr) | sd '==> ReleaseNotes/(.+)\.md <==' '# $$1\n\n**[Download $(NAME) $$1 →](https://files.lowtechguys.com/releases/$(NAME)-$$1.dmg)**' > CHANGELOG.md
+
+Releases/changelog.html: CHANGELOG.md
+	pandoc -f gfm --section-divs -o $@ --standalone --metadata title="$(NAME) Changelog" --css "$(RELEASE_CSS)" CHANGELOG.md
+
+changelog: Releases/changelog.html
+
+release:
+	gh release create v$(VERSION) -F ReleaseNotes/$(VERSION).md "Releases/$(NAME)-$(VERSION).dmg#$(NAME).dmg"
+	git fetch --tags
+
+# dSYM upload needs the classic `sentry-cli` (the newer `sentry` 0.37.0 has no Apple
+# debug-file upload). Auth comes from the token in ~/.sentryclirc; we strip any ambient
+# SENTRY_AUTH_TOKEN so a stale shell env var can't override it (no `op run` needed, so
+# releases work unattended / from the phone).
+sentry:
+	env -u SENTRY_AUTH_TOKEN sentry-cli upload-dif --include-sources -o $(SENTRY_ORG) -p $(SENTRY_PROJECT) --wait -- $(DSYM_DIR)
+	$(MAKE) record-dsyms
+
+# Record the debug-IDs (UUIDs) of the dSYMs built for this version, keyed by version,
+# into $(DSYM_UUID_FILE). Sentry stores dSYMs by debug-ID, not by version, so this map
+# is what lets `make download-dsym VERSION=x.y.z` fetch the right ones later.
+record-dsyms:
+	@mkdir -p Releases
+	@uuids=$$(find "$(DSYM_DIR)" -name '*.dSYM' -exec dwarfdump --uuid {} + 2>/dev/null | awk '{print tolower($$2)}' | sort -u | tr '\n' ' ' | sed 's/  *$$//'); \
+	if [ -z "$$uuids" ]; then echo "record-dsyms: no dSYMs found under $(DSYM_DIR)"; exit 0; fi; \
+	touch $(DSYM_UUID_FILE); \
+	grep -v "^$(FULL_VERSION) =" $(DSYM_UUID_FILE) > $(DSYM_UUID_FILE).tmp 2>/dev/null || true; \
+	echo "$(FULL_VERSION) = $$uuids" >> $(DSYM_UUID_FILE).tmp; \
+	sort -Vr $(DSYM_UUID_FILE).tmp -o $(DSYM_UUID_FILE); rm -f $(DSYM_UUID_FILE).tmp; \
+	echo "record-dsyms: $(FULL_VERSION) -> $$uuids"
+
+# Download the dSYMs for a released version from Sentry (to symbolicate a crash later):
+#   make download-dsym VERSION=x.y.z
+# Resolves each recorded debug-ID to its file id and saves the dSYMs under $(DSYM_OUT).
+download-dsym:
+	@test -n "$(VERSION)" || { echo "Usage: make download-dsym VERSION=x.y.z"; exit 1; }
+	@test -f $(DSYM_UUID_FILE) || { echo "No $(DSYM_UUID_FILE) yet; run 'make sentry' on a release build to record UUIDs"; exit 1; }
+	@uuids=$$(awk -F' *= *' '$$1=="$(VERSION)"{print $$2}' $(DSYM_UUID_FILE)); \
+	if [ -z "$$uuids" ]; then echo "No dSYM UUIDs recorded for $(VERSION). Recorded versions:"; cut -d= -f1 $(DSYM_UUID_FILE) | sed 's/  *$$//; s/^/  /'; exit 1; fi; \
+	token=$$(sed -n 's/^ *token *= *//p' ~/.sentryclirc 2>/dev/null | head -1); \
+	[ -n "$$token" ] || token=$$SENTRY_AUTH_TOKEN; \
+	if [ -z "$$token" ]; then echo "No Sentry auth token found (~/.sentryclirc or \$$SENTRY_AUTH_TOKEN)"; exit 1; fi; \
+	out=$(DSYM_OUT)/$(SENTRY_PROJECT)-$(VERSION); mkdir -p "$$out"; \
+	api=https://sentry.io/api/0/projects/$(SENTRY_ORG)/$(SENTRY_PROJECT)/files/dsyms; \
+	for u in $$uuids; do \
+	  curl -fsSL -H "Authorization: Bearer $$token" "$$api/?debug_id=$$u" \
+	    | python3 -c 'import json,sys; [print(o["id"], o["objectName"], o["cpuName"], (o.get("data") or {}).get("type","dbg")) for o in json.load(sys.stdin)]' \
+	    | while read id obj cpu typ; do \
+	        ext=debug; [ "$$typ" = src ] && ext=zip; \
+	        echo "  $$obj ($$cpu, $$typ) [$$u] -> id $$id"; \
+	        curl -fsSL -H "Authorization: Bearer $$token" "$$api/?id=$$id" -o "$$out/$$obj-$$cpu-$$typ-$$id.$$ext"; \
+	      done; \
+	done; \
+	echo "Downloaded dSYMs for $(VERSION) to $$out"
+
+appcast: Releases/$(NAME)-$(FULL_VERSION).html changelog
+	rm Releases/$(NAME).dmg || true
+ifneq (, $(BETA))
+	rm Releases/$(NAME)$(FULL_VERSION)*.delta >/dev/null 2>/dev/null || true
+	$(GENERATE_APPCAST) --channel beta --maximum-versions 10 --maximum-deltas $(DELTAS) --link "https://lowtechguys.com/cling" --full-release-notes-url "https://files.lowtechguys.com/cling/changelog.html" --release-notes-url-prefix https://files.lowtechguys.com/ReleaseNotes/ --download-url-prefix "https://files.lowtechguys.com/releases/" -o Releases/appcast.xml Releases
+else
+	rm Releases/$(NAME)$(FULL_VERSION)*.delta >/dev/null 2>/dev/null || true
+	rm Releases/$(NAME)-*b*.dmg >/dev/null 2>/dev/null || true
+	rm Releases/$(NAME)*b*.delta >/dev/null 2>/dev/null || true
+	$(GENERATE_APPCAST) --maximum-versions 10 --maximum-deltas $(DELTAS) --link "https://lowtechguys.com/cling" --full-release-notes-url "https://files.lowtechguys.com/cling/changelog.html" --release-notes-url-prefix https://files.lowtechguys.com/ReleaseNotes/ --download-url-prefix "https://files.lowtechguys.com/releases/" -o Releases/appcast.xml Releases
+	cp Releases/$(NAME)-$(FULL_VERSION).dmg Releases/$(NAME).dmg
+endif
+
+
+setversion: OLD_VERSION=$(shell rg -o --no-filename 'MARKETING_VERSION = ([^;]+).+' -r '$$1' *.xcodeproj/project.pbxproj | head -1)
+setversion: SHELL=fish
+setversion:
+ifneq (, $(FULL_VERSION))
+	sdfk '((?:CURRENT_PROJECT|MARKETING)_VERSION) = $(OLD_VERSION);' '$$1 = $(FULL_VERSION);'
+endif
+
+INCLUDE_RELEASES=
+
+Releases/$(NAME)-%.html: ReleaseNotes/$(VERSION)*.md
+	@echo Compiling $^ to $@
+ifneq (, $(BETA))
+	{ cat $(shell ls -t ReleaseNotes/$(VERSION)*.md); for v in $(subst /, ,$(INCLUDE_RELEASES)); do echo; echo "## From v$$v"; echo; cat "ReleaseNotes/$$v.md"; done; } | pandoc -f gfm --section-divs -o $@ --standalone --metadata title="$(NAME) $(FULL_VERSION) - Release Notes" --css "$(RELEASE_CSS)"
+else
+	{ cat ReleaseNotes/$(VERSION).md; for v in $(subst /, ,$(INCLUDE_RELEASES)); do echo; echo "## From v$$v"; echo; cat "ReleaseNotes/$$v.md"; done; } | pandoc -f gfm --section-divs -o $@ --standalone --metadata title="$(NAME) $(FULL_VERSION) - Release Notes" --css "$(RELEASE_CSS)"
+endif
+
+.PHONY: hooks
+hooks:
+	@ln -sf "$(CURDIR)/.pre-commit.sh" .git/hooks/pre-commit && echo "pre-commit hook installed -> .pre-commit.sh"
