@@ -1,0 +1,80 @@
+name: verify
+
+# Proves a change to the tooling still produces a working unlocked Cling, against the newest
+# upstream release: the unlock applies, tools/verify_unlock.py approves the resulting diff, and the
+# patched source builds into a universal, validly signed app. No secrets are used or needed.
+# Required status checks: `verify-unlock`, `verify-build`.
+
+on:
+  pull_request:
+    branches: [tooling]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify-unlock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Apply the unlock to the newest upstream release and verify the diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
+          echo "checking against upstream $UPSTREAM $tag"
+          git clone -q --depth 1 --branch "$tag" "https://github.com/$UPSTREAM.git" src
+          python3 ci/tools/unlock_pro.py src
+          python3 ci/tools/verify_unlock.py src
+
+  verify-build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          app="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          echo "using $app"
+          sudo xcode-select -s "$app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Apply the unlock to the newest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ vars.UPSTREAM_REPO || 'FuzzyIdeas/Cling' }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          git clone -q --depth 1 --branch "$tag" "https://github.com/$UPSTREAM.git" src
+          python3 ci/tools/unlock_pro.py src
+          python3 ci/tools/verify_unlock.py src
+
+      - name: Build, ad-hoc signed
+        run: bash ci/tools/build.sh src "${TAG#v}" "$PWD/dist"
+
+      - name: Check the built app
+        run: |
+          set -euo pipefail
+          ditto -x -k dist/*.zip out
+          app=out/Cling.app
+          codesign --verify --deep --strict "$app"
+          archs=$(lipo -archs "$app/Contents/MacOS/Cling")
+          echo "architectures: $archs"
+          [[ "$archs" == *arm64* && "$archs" == *x86_64* ]] || { echo "::error::not a universal binary"; exit 1; }
+          feed=$(plutil -extract SUFeedURL raw "$app/Contents/Info.plist")
+          echo "feed: $feed"
+          [[ "$feed" == https://raw.githubusercontent.com/oenderg/cling-free/* ]] || { echo "::error::wrong update feed"; exit 1; }
