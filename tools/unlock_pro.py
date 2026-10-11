@@ -19,6 +19,11 @@ What it changes, and why:
   4. Sparkle is pointed at this fork's appcast and public key, so the app can't replace itself
      with the official, locked build.
   5. Error reporting to the author's Sentry project is switched off for this unofficial build.
+  6. TEMPORARY: in Cling/VolumeLive.swift, a local variable is renamed (two lines) because Xcode
+     26.6, the newest Xcode on GitHub's macOS runners, cannot compile upstream 3.2.0's
+     `let (lost, folders) = lock.withLock { (lostTrack, folders) }`. It is optional on purpose: once
+     upstream changes that statement (FuzzyIdeas/Cling#39) it skips itself. Remove the step,
+     its `ALLOWED` entry in verify_unlock.py and the README sentence when upstream has the fix.
 
 Usage: unlock_pro.py <path-to-Cling-checkout>
 """
@@ -108,6 +113,23 @@ def patch_licence_check(root):
                     "Sentry off", required=False)
 
 
+def patch_xcode26_workaround(root):
+    # TEMPORARY, see item 6 in the docstring. One block, replaced all or nothing: renaming only the
+    # first line would leave the second reading `folders` outside the lock. Older releases don't
+    # have the file at all, and a later one may have moved it: both just skip.
+    target = root / "Cling/VolumeLive.swift"
+    if not target.exists():
+        record("Xcode 26.6 workaround (temporary)", False, "Cling/VolumeLive.swift does not exist")
+        return
+    replace_literal(
+        target,
+        "let (lost, folders) = lock.withLock { (lostTrack, folders) }\n"
+        "            return lost ? nil : FSEventsHistory.outermost(Array(folders))",
+        "let (lost, snapshot) = lock.withLock { (lostTrack, folders) }\n"
+        "            return lost ? nil : FSEventsHistory.outermost(Array(snapshot))",
+        "Xcode 26.6 workaround: rename a local in VolumeLive.swift (temporary)", required=False)
+
+
 def patch_warpdrop(root, stubs_dir):
     pbx = root / "Cling.xcodeproj/project.pbxproj"
     replace_literal(pbx, WARPDROP_PATH, WARPDROP_STUB, "WarpDrop -> stub package", count=0)
@@ -132,6 +154,7 @@ def main():
     stubs_dir = Path(__file__).resolve().parent / "stubs"
     patch_proactive(root)
     patch_licence_check(root)
+    patch_xcode26_workaround(root)
     patch_warpdrop(root, stubs_dir)
     patch_sparkle(root)
     print(f"unlocked {root}")

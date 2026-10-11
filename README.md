@@ -67,7 +67,10 @@ domain. Your upstream Cling is backed up before it's replaced.
 | Error reports to upstream's Sentry | sent when enabled in Settings | removed |
 | Auto-update | upstream's feed | this repo's feed, signed with this repo's key |
 
-Everything else is upstream's code, unmodified.
+Everything else is upstream's code, unmodified, apart from a temporary two-line rename in
+`VolumeLive.swift` that works around a compiler bug in Xcode 26.6, the newest Xcode on GitHub's
+runners ([upstream PR #39](https://github.com/FuzzyIdeas/Cling/pull/39)). It skips itself once
+upstream has the fix.
 
 **Send securely is disabled.** Upstream's project depends on a package called `WarpDrop` that is
 referenced by a path on the author's own machine (`../../../Github/alin23/warpdrop/swift`) and
