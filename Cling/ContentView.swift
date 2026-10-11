@@ -944,7 +944,7 @@ struct ContentView: View {
                     appManager.pasteToFrontmostApp(paths: paths, separator: " ", quoted: true)
                 } else {
                     for path in paths {
-                        NSWorkspace.shared.open(path.url)
+                        openInPreferredViewer(path.url)
                     }
                 }
             }
@@ -2056,7 +2056,7 @@ struct ContentView: View {
         let missing = paths.filter { !$0.exists }
         if missing.isEmpty {
             for path in paths {
-                NSWorkspace.shared.open(path.url)
+                openInPreferredViewer(path.url)
             }
         } else {
             pathNotFoundMessage = missing.map(\.string).joined(separator: "\n")

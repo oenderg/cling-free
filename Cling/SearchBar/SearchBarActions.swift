@@ -28,7 +28,7 @@ extension SearchBarController {
         case .open:
             RH.trackRun(sel)
             for url in sel.map(\.url) {
-                NSWorkspace.shared.open(url)
+                openInPreferredViewer(url)
             }
             collapse()
         case .showInFinder:

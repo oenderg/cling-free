@@ -691,7 +691,7 @@ struct ActionButtons: View {
             if isReturn, mods.isEmpty, !enterPastesToTerminal {
                 RH.trackRun(sel)
                 for url in sel.map(\.url) {
-                    NSWorkspace.shared.open(url)
+                    openInPreferredViewer(url)
                 }
                 return nil
             }
@@ -699,7 +699,7 @@ struct ActionButtons: View {
             if isReturn, mods == [.command, .shift], inTerminal {
                 RH.trackRun(sel)
                 for url in sel.map(\.url) {
-                    NSWorkspace.shared.open(url)
+                    openInPreferredViewer(url)
                 }
                 return nil
             }
@@ -1027,7 +1027,7 @@ struct ActionButtons: View {
     private func openSelectedResults() {
         RH.trackRun(selectedResults)
         for url in selectedResults.map(\.url) {
-            NSWorkspace.shared.open(url)
+            openInPreferredViewer(url)
         }
     }
 

@@ -169,7 +169,7 @@ struct RightClickMenu: View {
         let paths = orderedSelection
         RH.trackRun(Set(paths))
         for path in paths {
-            NSWorkspace.shared.open(path.url)
+            openInPreferredViewer(path.url)
         }
     }
 

@@ -10,10 +10,32 @@ private let log = Logger(subsystem: clingSubsystem, category: "Shared")
 /// parent dirs first guarantees a window exists, then the selection sticks.
 func revealInFinder(_ urls: [URL]) {
     guard !urls.isEmpty else { return }
-    for parent in Set(urls.map { $0.deletingLastPathComponent() }) {
-        NSWorkspace.shared.open(parent)
+    // With another file manager set as NSFileViewer, the reveal below already goes to it,
+    // and opening the parents would only add a Finder window next to it.
+    if customFileViewerURL == nil {
+        for parent in Set(urls.map { $0.deletingLastPathComponent() }) {
+            NSWorkspace.shared.open(parent)
+        }
     }
     NSWorkspace.shared.activateFileViewerSelecting(urls)
+}
+
+/// The app chosen with `defaults write -g NSFileViewer`, unless it is Finder or can't be found.
+var customFileViewerURL: URL? {
+    guard let id = UserDefaults.standard.string(forKey: "NSFileViewer"), id != "com.apple.finder" else { return nil }
+    return NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+}
+
+/// `NSWorkspace.open`, except that folders go to the NSFileViewer app when one is set: the system's
+/// folder handler is always Finder, so a plain open would ignore that setting.
+func openInPreferredViewer(_ url: URL) {
+    let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]))
+        .map { $0.isDirectory == true && $0.isPackage != true } ?? false
+    if isFolder, let viewer = customFileViewerURL {
+        NSWorkspace.shared.open([url], withApplicationAt: viewer, configuration: .init(), completionHandler: { _, _ in })
+    } else {
+        NSWorkspace.shared.open(url)
+    }
 }
 
 /// SwiftUI Table on macOS doesn't auto-scroll on selection changes, so we
