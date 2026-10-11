@@ -26,6 +26,8 @@ ALLOWED = {
     r"Cling\.xcodeproj/project\.pbxproj": 8,
     r"Cling/Info\.plist": 8,
     r"Stubs/WarpDrop/.*": 120,
+    # TEMPORARY: the two-line rename in unlock_pro.py's Xcode 26.6 workaround (4 = 2 removed + 2 added).
+    r"Cling/VolumeLive\.swift": 4,
 }
 
 # Anything in added lines that reaches outside the process. The appcast URL is the one exception.
