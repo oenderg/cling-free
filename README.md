@@ -74,7 +74,7 @@ Branches:
 - **`main`** is rebuilt as *upstream `main` + one commit of tooling*, so GitHub's comparison view reads "1 commit ahead". It is force-pushed; never edit it directly.
 - **`unlocked`** is the pristine upstream release tag with the patch applied, regenerated on each new release. This is the exact source every release binary is built from.
 
-A workflow checks for a new upstream release every hour, and a daily run backs it up. When there is one it regenerates `unlocked`, builds on a macOS runner, signs, publishes a release and updates the appcast.
+A workflow checks for a new upstream release every hour, and a daily run backs it up. When there is one it regenerates `unlocked`, builds on a macOS runner, signs, publishes a release and updates the appcast. If a release can't be built, nothing is published and the previous release stays in place.
 
 </details>
 
