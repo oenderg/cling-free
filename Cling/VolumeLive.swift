@@ -522,8 +522,8 @@ final class WalkWatch: @unchecked Sendable {
         }
 
         func toWalk() -> [String]? {
-            let (lost, folders) = lock.withLock { (lostTrack, folders) }
-            return lost ? nil : FSEventsHistory.outermost(Array(folders))
+            let (lost, snapshot) = lock.withLock { (lostTrack, folders) }
+            return lost ? nil : FSEventsHistory.outermost(Array(snapshot))
         }
 
         private let root: String
