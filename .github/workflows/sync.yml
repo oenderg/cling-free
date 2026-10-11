@@ -49,7 +49,9 @@ jobs:
           mkdir -p .github/workflows tools
           cp -R ../ci/.github/workflows/. .github/workflows/
           cp -R ../ci/tools/. tools/
-          cp ../ci/README.md README.md
+          # The front page is our README followed by upstream's current one, so it never goes stale.
+          cp README.md ../upstream-README.md
+          cat ../ci/README.md ../upstream-README.md > README.md
           # Carry forward the appcast the build job publishes, so mirroring never unpublishes it.
           curl -fsSL "https://raw.githubusercontent.com/$REPO/main/appcast.xml" -o appcast.xml || true
           git config user.name 'github-actions[bot]'
