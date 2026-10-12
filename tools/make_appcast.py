@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Sparkle appcast for a release.
 
-Usage: make_appcast.py <zip> <version> <download-url> <output.xml>
+Usage: make_appcast.py <archive> <version> <download-url> <output.xml>
 
 The EdDSA private key comes from $SPARKLE_ED_PRIVATE_KEY (a PEM). Sparkle signs the raw bytes of
 the archive with ed25519 and compares against SUPublicEDKey in the app's Info.plist, so a build

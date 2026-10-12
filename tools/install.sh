@@ -22,13 +22,26 @@ fail() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 [ -w /Applications ] || fail "/Applications isn't writable by your user — you need an admin account"
 
 say "Finding the latest release"
-url=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | sed -n 's/.*"browser_download_url": *"\([^"]*\.zip\)".*/\1/p' | head -1)
+assets=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+  | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')
+# Releases are disk images; earlier ones were zip files, so accept either.
+url=$(printf '%s\n' "$assets" | grep -E '\.dmg$' | head -1 || true)
+[ -n "$url" ] || url=$(printf '%s\n' "$assets" | grep -E '\.zip$' | head -1 || true)
 [ -n "$url" ] || fail "no release asset found for $REPO"
-version=$(basename "$url" | sed -E 's/^Cling-(.*)-unlocked\.zip$/\1/')
+version=$(basename "$url" | sed -E 's/^Cling-(.*)-unlocked\.(dmg|zip)$/\1/')
 say "Downloading Cling $version"
-curl -fsSL "$url" -o "$TMP/Cling.zip"
-ditto -x -k "$TMP/Cling.zip" "$TMP/extracted"
+curl -fsSL "$url" -o "$TMP/download"
+mkdir -p "$TMP/extracted"
+case "$url" in
+  *.dmg)
+    mkdir -p "$TMP/mnt"
+    hdiutil attach "$TMP/download" -readonly -nobrowse -noautoopen -noverify -mountpoint "$TMP/mnt" >/dev/null 2>&1 \
+      || fail "couldn't open the downloaded disk image"
+    ditto "$TMP/mnt/Cling.app" "$TMP/extracted/Cling.app" || { hdiutil detach "$TMP/mnt" -force >/dev/null 2>&1; fail "the disk image didn't contain Cling.app"; }
+    hdiutil detach "$TMP/mnt" >/dev/null 2>&1 || hdiutil detach "$TMP/mnt" -force >/dev/null 2>&1 || true
+    ;;
+  *) ditto -x -k "$TMP/download" "$TMP/extracted" ;;
+esac
 new="$TMP/extracted/Cling.app"
 [ -d "$new" ] || fail "the downloaded archive didn't contain Cling.app"
 
