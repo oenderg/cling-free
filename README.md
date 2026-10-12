@@ -20,11 +20,11 @@ Then grant **Full Disk Access** in System Settings → Privacy & Security, which
 <summary><b>Manual install</b>, if you'd rather not pipe a script into bash</summary>
 
 ```bash
-# download and unzip Cling-<version>-unlocked.zip from the releases page, then:
+# download Cling-<version>-unlocked.dmg from the releases page and open it, then:
 osascript -e 'quit app "Cling"'
 ditto /Applications/Cling.app ~/Desktop/Cling-backup.app   # if you have one already
 rm -rf /Applications/Cling.app
-ditto ~/Downloads/Cling.app /Applications/Cling.app
+ditto "/Volumes/Cling <version>/Cling.app" /Applications/Cling.app
 xattr -dr com.apple.quarantine /Applications/Cling.app
 tccutil reset SystemPolicyAllFiles com.lowtechguys.Cling
 open /Applications/Cling.app

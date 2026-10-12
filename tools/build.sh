@@ -59,5 +59,13 @@ test "$(defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString)" = 
 codesign -d -r- "$APP" 2>&1 | sed -n 's/^#* *designated => /designated requirement: /p'
 echo "architectures: $(lipo -archs "$APP/Contents/MacOS/Cling")"
 
-ditto -c -k --keepParent "$APP" "$OUT/Cling-$VERSION-unlocked.zip"
-echo "built $OUT/Cling-$VERSION-unlocked.zip"
+# A disk image with the usual drag-to-Applications layout. Sparkle ignores the symlink and
+# hidden files when it unpacks an image for an update, so this doesn't affect auto-update.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+ditto "$APP" "$STAGE/Cling.app"
+ln -s /Applications "$STAGE/Applications"
+DMG="$OUT/Cling-$VERSION-unlocked.dmg"
+rm -f "$DMG"
+hdiutil create -quiet -volname "Cling $VERSION" -srcfolder "$STAGE" -format UDZO -ov "$DMG"
+echo "built $DMG"

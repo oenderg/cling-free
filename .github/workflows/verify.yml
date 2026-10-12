@@ -69,7 +69,12 @@ jobs:
       - name: Check the built app
         run: |
           set -euo pipefail
-          ditto -x -k dist/*.zip out
+          mkdir -p mnt out
+          hdiutil attach dist/*.dmg -readonly -nobrowse -noautoopen -mountpoint mnt >/dev/null
+          ls -la mnt
+          [ -L mnt/Applications ] || { echo "::error::the disk image has no Applications link"; exit 1; }
+          ditto mnt/Cling.app out/Cling.app
+          hdiutil detach mnt >/dev/null || { sleep 3; hdiutil detach mnt -force >/dev/null; }
           app=out/Cling.app
           codesign --verify --deep --strict "$app"
           archs=$(lipo -archs "$app/Contents/MacOS/Cling")
