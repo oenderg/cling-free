@@ -3,6 +3,9 @@ name: watch-upstream
 # Looks for a new upstream release every hour and starts `sync-upstream` when there is one we have
 # not built. The daily `sync-upstream` schedule stays as the backstop and still does the `main` mirror.
 #
+# It also starts nothing for a release whose tag does not carry that version's source (upstream once
+# published 3.3.0 with the tag still on the 3.2.0 commit); it checks again every hour.
+#
 # It starts nothing while a `ci-failure` issue is open (the daily run retries a broken release, so an
 # hourly retry would only add comments and auto-fix runs) or while a sync is already running.
 
@@ -36,6 +39,12 @@ jobs:
           echo "upstream=$upstream ours=$ours"
           if [ "$ours" = "$upstream-unlocked" ]; then
             echo "Up to date."
+            exit 0
+          fi
+          pbx=$(gh api "repos/$UPSTREAM/contents/Cling.xcodeproj/project.pbxproj?ref=$upstream" -H "Accept: application/vnd.github.raw")
+          source_version=$(printf '%s\n' "$pbx" | grep -m1 -o 'MARKETING_VERSION = [^;]*' | sed 's/.*= //' || true)
+          if [ "$source_version" != "${upstream#v}" ]; then
+            echo "Tag $upstream carries source version '${source_version:-unknown}', so the release has no matching source yet; not building."
             exit 0
           fi
           open=$(gh issue list --repo "$REPO" --label ci-failure --state open --json number -q length)

@@ -92,7 +92,12 @@ jobs:
           ours=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo none)
           echo "upstream=$upstream ours=$ours"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$ours" = "v$version-unlocked" ] && [ "$FORCE" != "true" ]; then
+          pbx=$(gh api "repos/$UPSTREAM/contents/Cling.xcodeproj/project.pbxproj?ref=$upstream" -H "Accept: application/vnd.github.raw")
+          source_version=$(printf '%s\n' "$pbx" | grep -m1 -o 'MARKETING_VERSION = [^;]*' | sed 's/.*= //' || true)
+          if [ "$source_version" != "$version" ]; then
+            echo "::notice::Upstream tag $upstream carries source version '${source_version:-unknown}', not $version: the release has no matching source, so nothing is built. Checked again on the next run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif [ "$ours" = "v$version-unlocked" ] && [ "$FORCE" != "true" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
